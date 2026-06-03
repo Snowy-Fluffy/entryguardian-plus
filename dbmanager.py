@@ -27,6 +27,36 @@ class DBManager:
 			self.cursor.execute('CREATE TABLE user(id, verified, blocked_until)')
 		if 'pending_chats' not in tables:
 			self.cursor.execute('CREATE TABLE pending_chats(user_id INTEGER, chat_id INTEGER)')
+		if 'roles' not in tables:
+			self.cursor.execute('CREATE TABLE roles(chat_id INTEGER, user_id INTEGER, role TEXT, UNIQUE(chat_id, user_id))')
+		if 'seen_users' not in tables:
+			self.cursor.execute('CREATE TABLE seen_users(user_id INTEGER PRIMARY KEY, username TEXT)')
+		if 'blocklist' not in tables:
+			self.cursor.execute('CREATE TABLE blocklist(user_id INTEGER PRIMARY KEY)')
+		if 'bot_chats' not in tables:
+			self.cursor.execute('CREATE TABLE bot_chats(chat_id INTEGER PRIMARY KEY)')
+		if 'ban_exceptions' not in tables:
+			self.cursor.execute('CREATE TABLE ban_exceptions(chat_id INTEGER, user_id INTEGER, UNIQUE(chat_id, user_id))')
+		if 'action_log' not in tables:
+			self.cursor.execute('CREATE TABLE action_log(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, ts INTEGER, text TEXT)')
+		if 'captcha_disabled' not in tables:
+			self.cursor.execute('CREATE TABLE captcha_disabled(chat_id INTEGER PRIMARY KEY)')
+		if 'raid_mode' not in tables:
+			self.cursor.execute('CREATE TABLE raid_mode(chat_id INTEGER PRIMARY KEY)')
+		if 'chat_rules' not in tables:
+			self.cursor.execute('CREATE TABLE chat_rules(chat_id INTEGER PRIMARY KEY, text TEXT)')
+		if 'mutes' not in tables:
+			self.cursor.execute('CREATE TABLE mutes(chat_id INTEGER, user_id INTEGER, until INTEGER, UNIQUE(chat_id, user_id))')
+		if 'global_mutes' not in tables:
+			self.cursor.execute('CREATE TABLE global_mutes(user_id INTEGER PRIMARY KEY, until INTEGER)')
+		if 'stopped_chats' not in tables:
+			self.cursor.execute('CREATE TABLE stopped_chats(chat_id INTEGER PRIMARY KEY)')
+		if 'cooldowns' not in tables:
+			self.cursor.execute('CREATE TABLE cooldowns(chat_id INTEGER, command TEXT, seconds INTEGER, UNIQUE(chat_id, command))')
+		if 'cooldown_use' not in tables:
+			self.cursor.execute('CREATE TABLE cooldown_use(chat_id INTEGER, user_id INTEGER, command TEXT, last_ts INTEGER, UNIQUE(chat_id, user_id, command))')
+		if 'command_banned' not in tables:
+			self.cursor.execute('CREATE TABLE command_banned(user_id INTEGER PRIMARY KEY)')
 		self.connection.commit()
 
 	def unix_time(self):
@@ -92,3 +122,280 @@ class DBManager:
 	def clear_pending_chats(self, user_id):
 		self.cursor.execute('DELETE FROM pending_chats WHERE user_id=?', (user_id,))
 		self.connection.commit()
+
+	def set_role(self, chat_id, user_id, role):
+		self.cursor.execute(
+			'INSERT INTO roles(chat_id, user_id, role) VALUES (?, ?, ?) '
+			'ON CONFLICT(chat_id, user_id) DO UPDATE SET role=excluded.role',
+			(chat_id, user_id, role)
+		)
+		self.connection.commit()
+
+	def remove_role(self, chat_id, user_id):
+		self.cursor.execute(
+			'DELETE FROM roles WHERE chat_id=? AND user_id=?',
+			(chat_id, user_id)
+		)
+		self.connection.commit()
+
+	def get_role(self, chat_id, user_id):
+		result = self.cursor.execute(
+			'SELECT role FROM roles WHERE chat_id=? AND user_id=?',
+			(chat_id, user_id)
+		).fetchone()
+		return result[0] if result else None
+
+	def is_admin(self, chat_id, user_id):
+		return self.get_role(chat_id, user_id) == 'admin'
+
+	def is_moderator(self, chat_id, user_id):
+		return self.get_role(chat_id, user_id) == 'moderator'
+
+	def get_admin_chats(self, user_id):
+		return [row[0] for row in self.cursor.execute(
+			"SELECT chat_id FROM roles WHERE user_id=? AND role='admin'",
+			(user_id,)
+		).fetchall()]
+
+	def list_roles(self, chat_id):
+		return self.cursor.execute(
+			'SELECT user_id, role FROM roles WHERE chat_id=?',
+			(chat_id,)
+		).fetchall()
+
+	def remember_user(self, user_id, username):
+		if not username:
+			return
+		username = username.lstrip('@').lower()
+		# A username can move between accounts; drop it from any stale row first.
+		self.cursor.execute(
+			'UPDATE seen_users SET username=NULL WHERE username=? AND user_id<>?',
+			(username, user_id)
+		)
+		self.cursor.execute(
+			'INSERT INTO seen_users(user_id, username) VALUES (?, ?) '
+			'ON CONFLICT(user_id) DO UPDATE SET username=excluded.username',
+			(user_id, username)
+		)
+		self.connection.commit()
+
+	def find_user_by_username(self, username):
+		username = username.lstrip('@').lower()
+		row = self.cursor.execute(
+			'SELECT user_id FROM seen_users WHERE username=?',
+			(username,)
+		).fetchone()
+		return row[0] if row else None
+
+	def add_to_blocklist(self, user_id):
+		self.cursor.execute('INSERT OR IGNORE INTO blocklist(user_id) VALUES (?)', (user_id,))
+		self.connection.commit()
+
+	def remove_from_blocklist(self, user_id):
+		self.cursor.execute('DELETE FROM blocklist WHERE user_id=?', (user_id,))
+		self.connection.commit()
+
+	def is_blocklisted(self, user_id):
+		return bool(self.cursor.execute('SELECT 1 FROM blocklist WHERE user_id=?', (user_id,)).fetchone())
+
+	def remember_chat(self, chat_id):
+		self.cursor.execute('INSERT OR IGNORE INTO bot_chats(chat_id) VALUES (?)', (chat_id,))
+		self.connection.commit()
+
+	def forget_chat(self, chat_id):
+		self.cursor.execute('DELETE FROM bot_chats WHERE chat_id=?', (chat_id,))
+		self.connection.commit()
+
+	def get_bot_chats(self):
+		return [row[0] for row in self.cursor.execute('SELECT chat_id FROM bot_chats').fetchall()]
+
+	def add_ban_exception(self, chat_id, user_id):
+		self.cursor.execute('INSERT OR IGNORE INTO ban_exceptions(chat_id, user_id) VALUES (?, ?)', (chat_id, user_id))
+		self.connection.commit()
+
+	def remove_ban_exception(self, chat_id, user_id):
+		self.cursor.execute('DELETE FROM ban_exceptions WHERE chat_id=? AND user_id=?', (chat_id, user_id))
+		self.connection.commit()
+
+	def is_ban_exception(self, chat_id, user_id):
+		return bool(self.cursor.execute('SELECT 1 FROM ban_exceptions WHERE chat_id=? AND user_id=?', (chat_id, user_id)).fetchone())
+
+	def clear_ban_exceptions(self, user_id):
+		self.cursor.execute('DELETE FROM ban_exceptions WHERE user_id=?', (user_id,))
+		self.connection.commit()
+
+	def add_log(self, chat_id, text):
+		self.cursor.execute(
+			'INSERT INTO action_log(chat_id, ts, text) VALUES (?, ?, ?)',
+			(chat_id, self.unix_time(), text)
+		)
+		# Keep only the most recent 200 staff actions per chat.
+		self.cursor.execute(
+			'DELETE FROM action_log WHERE chat_id=? AND id NOT IN '
+			'(SELECT id FROM action_log WHERE chat_id=? ORDER BY id DESC LIMIT 200)',
+			(chat_id, chat_id)
+		)
+		self.connection.commit()
+
+	def get_logs(self, chat_id, limit=200):
+		return self.cursor.execute(
+			'SELECT ts, text FROM action_log WHERE chat_id=? ORDER BY id DESC LIMIT ?',
+			(chat_id, limit)
+		).fetchall()
+
+	def set_captcha_enabled(self, chat_id, enabled):
+		if enabled:
+			self.cursor.execute('DELETE FROM captcha_disabled WHERE chat_id=?', (chat_id,))
+		else:
+			self.cursor.execute('INSERT OR IGNORE INTO captcha_disabled(chat_id) VALUES (?)', (chat_id,))
+		self.connection.commit()
+
+	def is_captcha_enabled(self, chat_id):
+		return not bool(self.cursor.execute('SELECT 1 FROM captcha_disabled WHERE chat_id=?', (chat_id,)).fetchone())
+
+	def set_raid_mode(self, chat_id, on):
+		if on:
+			self.cursor.execute('INSERT OR IGNORE INTO raid_mode(chat_id) VALUES (?)', (chat_id,))
+		else:
+			self.cursor.execute('DELETE FROM raid_mode WHERE chat_id=?', (chat_id,))
+		self.connection.commit()
+
+	def is_raid_mode(self, chat_id):
+		return bool(self.cursor.execute('SELECT 1 FROM raid_mode WHERE chat_id=?', (chat_id,)).fetchone())
+
+	def get_raid_chats(self):
+		return [row[0] for row in self.cursor.execute('SELECT chat_id FROM raid_mode').fetchall()]
+
+	def set_rules(self, chat_id, text):
+		if text:
+			self.cursor.execute(
+				'INSERT INTO chat_rules(chat_id, text) VALUES (?, ?) '
+				'ON CONFLICT(chat_id) DO UPDATE SET text=excluded.text',
+				(chat_id, text)
+			)
+		else:
+			self.cursor.execute('DELETE FROM chat_rules WHERE chat_id=?', (chat_id,))
+		self.connection.commit()
+
+	def get_rules(self, chat_id):
+		row = self.cursor.execute('SELECT text FROM chat_rules WHERE chat_id=?', (chat_id,)).fetchone()
+		return row[0] if row else None
+
+	def add_mute(self, chat_id, user_id, until):
+		# until == 0 means a permanent mute.
+		self.cursor.execute(
+			'INSERT INTO mutes(chat_id, user_id, until) VALUES (?, ?, ?) '
+			'ON CONFLICT(chat_id, user_id) DO UPDATE SET until=excluded.until',
+			(chat_id, user_id, until or 0)
+		)
+		self.connection.commit()
+
+	def remove_mute(self, chat_id, user_id):
+		self.cursor.execute('DELETE FROM mutes WHERE chat_id=? AND user_id=?', (chat_id, user_id))
+		self.connection.commit()
+
+	def is_muted(self, chat_id, user_id):
+		row = self.cursor.execute('SELECT until FROM mutes WHERE chat_id=? AND user_id=?', (chat_id, user_id)).fetchone()
+		if not row:
+			return False
+		until = row[0]
+		if until and until <= self.unix_time():  # expired — clean it up
+			self.remove_mute(chat_id, user_id)
+			return False
+		return True
+
+	def get_mute_until(self, chat_id, user_id):
+		row = self.cursor.execute('SELECT until FROM mutes WHERE chat_id=? AND user_id=?', (chat_id, user_id)).fetchone()
+		return row[0] if row else 0
+
+	def set_global_mute(self, user_id, until):
+		self.cursor.execute(
+			'INSERT INTO global_mutes(user_id, until) VALUES (?, ?) '
+			'ON CONFLICT(user_id) DO UPDATE SET until=excluded.until',
+			(user_id, until or 0)
+		)
+		self.connection.commit()
+
+	def remove_global_mute(self, user_id):
+		self.cursor.execute('DELETE FROM global_mutes WHERE user_id=?', (user_id,))
+		self.connection.commit()
+
+	def is_globally_muted(self, user_id):
+		row = self.cursor.execute('SELECT until FROM global_mutes WHERE user_id=?', (user_id,)).fetchone()
+		if not row:
+			return False
+		until = row[0]
+		if until and until <= self.unix_time():
+			self.remove_global_mute(user_id)
+			return False
+		return True
+
+	def get_global_mute_until(self, user_id):
+		row = self.cursor.execute('SELECT until FROM global_mutes WHERE user_id=?', (user_id,)).fetchone()
+		return row[0] if row else 0
+
+	def effective_mute(self, chat_id, user_id):
+		"""Whether the user is muted in this chat (globally or locally) and until when (0 = forever)."""
+		if self.is_globally_muted(user_id):
+			return True, self.get_global_mute_until(user_id)
+		if self.is_muted(chat_id, user_id):
+			return True, self.get_mute_until(chat_id, user_id)
+		return False, 0
+
+	def set_chat_stopped(self, chat_id, stopped):
+		if stopped:
+			self.cursor.execute('INSERT OR IGNORE INTO stopped_chats(chat_id) VALUES (?)', (chat_id,))
+		else:
+			self.cursor.execute('DELETE FROM stopped_chats WHERE chat_id=?', (chat_id,))
+		self.connection.commit()
+
+	def is_chat_stopped(self, chat_id):
+		return bool(self.cursor.execute('SELECT 1 FROM stopped_chats WHERE chat_id=?', (chat_id,)).fetchone())
+
+	def set_cooldown(self, chat_id, command, seconds):
+		if seconds and seconds > 0:
+			self.cursor.execute(
+				'INSERT INTO cooldowns(chat_id, command, seconds) VALUES (?, ?, ?) '
+				'ON CONFLICT(chat_id, command) DO UPDATE SET seconds=excluded.seconds',
+				(chat_id, command, seconds)
+			)
+		else:
+			self.cursor.execute('DELETE FROM cooldowns WHERE chat_id=? AND command=?', (chat_id, command))
+		self.connection.commit()
+
+	def get_cooldown(self, chat_id, command):
+		row = self.cursor.execute(
+			'SELECT seconds FROM cooldowns WHERE chat_id=? AND command=?', (chat_id, command)
+		).fetchone()
+		return row[0] if row else 0
+
+	def cooldown_remaining(self, chat_id, user_id, command, cd_seconds):
+		row = self.cursor.execute(
+			'SELECT last_ts FROM cooldown_use WHERE chat_id=? AND user_id=? AND command=?',
+			(chat_id, user_id, command)
+		).fetchone()
+		if not row:
+			return 0
+		return max(0, cd_seconds - (self.unix_time() - row[0]))
+
+	def record_cooldown_use(self, chat_id, user_id, command):
+		self.cursor.execute(
+			'INSERT INTO cooldown_use(chat_id, user_id, command, last_ts) VALUES (?, ?, ?, ?) '
+			'ON CONFLICT(chat_id, user_id, command) DO UPDATE SET last_ts=excluded.last_ts',
+			(chat_id, user_id, command, self.unix_time())
+		)
+		self.connection.commit()
+
+	def add_command_ban(self, user_id):
+		self.cursor.execute('INSERT OR IGNORE INTO command_banned(user_id) VALUES (?)', (user_id,))
+		self.connection.commit()
+
+	def remove_command_ban(self, user_id):
+		self.cursor.execute('DELETE FROM command_banned WHERE user_id=?', (user_id,))
+		self.connection.commit()
+
+	def is_command_banned(self, user_id):
+		return bool(self.cursor.execute('SELECT 1 FROM command_banned WHERE user_id=?', (user_id,)).fetchone())
+
+	def get_command_banned(self):
+		return [row[0] for row in self.cursor.execute('SELECT user_id FROM command_banned').fetchall()]

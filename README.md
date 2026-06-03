@@ -63,8 +63,74 @@ MARIO_MIN_PLAY_TIME=5.0   # Mario: minimum seconds from page load to flagpole ev
 MAX_ATTEMPTS=3            # wrong code attempts before temp block
 COOL_DOWN=900             # temp block duration in seconds
 LOCALE=ru_RU
-BLOCKLIST=                # comma-separated Telegram user IDs to permanently ban on join
+OWNERS=                   # comma-separated Telegram user IDs of bot owners (full access in every chat)
 ```
+
+## Moderation
+
+The bot has a per-chat role system with three levels:
+
+- **Owners** — defined only in `.env` via `OWNERS`. They have access to every command in every chat the bot is in.
+- **Admins** — scoped to a single chat. The **chat creator** is made an admin automatically when the bot is added. Admins have access to all commands in their own chat (never in other chats) and can manage both admins and moderators of that chat.
+- **Moderators** — scoped to a single chat, below admins. They can be added/removed only by admins (or owners) and cannot manage roles themselves.
+
+### Commands (group chats only)
+
+| Command | Who can use it | Effect |
+|---------|----------------|--------|
+| `/ban [reason]` | moderators, admins, owners | **Local** ban: ban the target user only in **this** chat and announce it |
+| `/gban [reason]` | admins, owners | **Global** ban: blocklist the user and ban them in every chat the bot is in. Announced in **all** chats — the origin chat shows who banned them (and the reason), other chats show that the user was banned in the origin chat (and the reason) |
+| `/sban` | admins, owners | **Silent local** ban: ban the target only in **this** chat, with nothing posted to the chat |
+| `/sgban` | admins, owners | **Silent** global ban: same reach as `/gban`, but nothing is posted to the chat |
+| `/unban` | moderators, admins, owners | **Local** unban: lift the ban in **this** chat as an exception. The user stays on the global blocklist and still can't join the bot's other chats |
+| `/ungban` | admins, owners | **Global** unban: remove the user from the blocklist and lift their ban in every chat the bot is in |
+| `/unsban` | admins, owners | **Silent local** unban: same as `/unban`, with nothing posted to the chat |
+| `/unsgban` | admins, owners | **Silent global** unban: same as `/ungban`, with nothing posted to the chat |
+| `/mute [duration] [reason]` | moderators, admins, owners | Mute the target in **this** chat. Duration like `10m`, `1h`, `1d`, `1w` (omit for permanent); reason optional. e.g. `mute @user 10m spam` or reply with `mute 1d` |
+| `/gmute` | admins, owners | **Global** mute: mute the target in every chat the bot is in, announced in all of them |
+| `/smute` | admins, owners | **Silent local** mute (no announcement) |
+| `/gsmute` | admins, owners | **Silent global** mute (no announcement) |
+| `/unmute [reason]` | moderators, admins, owners | Unmute the target in **this** chat (optional reason) |
+| `/ungmute [reason]` | admins, owners | **Global** unmute across every chat |
+| `/unsmute` | admins, owners | **Silent local** unmute |
+| `/ungsmute` | admins, owners | **Silent global** unmute |
+| `/delete` | moderators, admins, owners | Delete the message this command **replies to** (and the command itself). Telegram only lets bots delete messages up to 48h old |
+| `/raid_on` | admins, owners | Enable **anti-raid** in this chat: every newcomer is locally banned, silently, with no captcha shown. The blocklist ID check still runs. While on, the bot posts a reminder every 5 minutes with how many were banned, so it isn't left on by accident |
+| `/raid_off` | admins, owners | Disable anti-raid |
+| `/add_adm` | admins, owners | Make the target user an admin of this chat |
+| `/del_adm` | admins, owners | Remove an admin of this chat (the chat creator cannot be removed) |
+| `/add_mod` | admins, owners | Make the target user a moderator of this chat |
+| `/del_mod` | admins, owners | Remove a moderator of this chat |
+| `/rules` | everyone | Show this chat's custom rules (set via the admin panel) |
+| `/staff` | everyone | List the admins and moderators of this chat (owners are not shown) |
+| `/admin` | admins, owners | Open the **admin panel** in a private chat with the bot (see below) |
+| `/help` | moderators, admins, owners | Show the list of available commands |
+
+The target user can be specified by **replying** to their message, or by passing their numeric **ID** (`/ban 123456789`) or **@username** (`/ban @user spam`). Replying or using a numeric ID is the most reliable; `@username` only resolves for users the bot has already seen in a chat (privacy mode must be off) or for public accounts.
+
+Command messages are deleted automatically after they are processed (the bot needs the *delete messages* admin right for this).
+
+### Admin panel (`/admin`)
+
+Sent in a **private chat** with the bot, `/admin` opens an inline-button panel. It is available to **admins** (for their own chats) and **owners** (for every chat the bot is in), and only **after the user has passed the captcha** (i.e. is verified). From the panel you can:
+
+- pick a chat (when you manage more than one);
+- see its admins and moderators;
+- add or remove an admin or a moderator (the bot asks for the target's `@username` or ID);
+- view that chat's staff action log;
+- set or clear that chat's custom rules (shown in-chat via `/rules`);
+- toggle the captcha for that chat. When the captcha is off, new members can write immediately without solving it — but the blocklist ID check on join still always runs;
+- toggle anti-raid for that chat (same effect as `/raid_on` / `/raid_off`).
+
+Owners additionally get two owner-only controls in the panel: stopping/resuming a chat (the bot ignores all commands from it) and a **global command ban** — a denylist of users who are completely forbidden from using any bot command (except `/start`) and the admin panel everywhere, even if they are admins or moderators (owners can't be added).
+
+The staff action log keeps the **last 200 actions per chat** (bans, unbans, role changes). Owner actions are **not** logged.
+
+### Blocklist
+
+There is no `BLOCKLIST` env variable anymore. The blocklist lives in the database and is populated by `/gban` and `/sgban`. Anyone on the blocklist is banned automatically when they try to join any chat the bot guards. Because Telegram does not let a bot enumerate a group's existing members when it is added, a blocklisted user who is *already* in a newly-added chat is banned as soon as they are next active (send a message), provided the bot is an admin there and privacy mode is off.
+
+> The bot can only enumerate chats it has observed *after* this version was deployed (Telegram does not expose the full list of a bot's chats). Re-adding the bot, or any message in a group, registers that chat for global bans.
 
 ## Running with Docker
 
@@ -127,7 +193,9 @@ entryguardian/
 ├── personal_msg_handler.py   # /start and code verification in bot DM
 ├── chat_member_handler.py    # new member detection, mute, welcome message
 ├── reaction_handler.py       # reaction events
-├── dbmanager.py              # SQLite: verified users, pending chats
+├── moderation_handler.py     # role commands + auto-admin on bot join
+├── permissions.py            # role/permission helpers (owner, admin, moderator)
+├── dbmanager.py              # SQLite: verified users, pending chats, roles
 ├── translator.py             # locale string loader
 ├── captcha.html              # DOOM minigame page (served under /doom/)
 ├── tetris_captcha.html       # Tetris minigame page (served under /tetris/)

@@ -35,19 +35,29 @@ _attempts_left: dict[int, int] = {}
 async def _unrestrict_user(bot: Bot, user_id: int) -> None:
     for chat_id in db_man.get_pending_chats(user_id):
         try:
-            await bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=user_id,
-                permissions=ChatPermissions(
-                    can_send_messages=True,
-                    can_send_audios=True,
-                    can_send_documents=True,
-                    can_send_photos=True,
-                    can_send_videos=True,
-                    can_send_polls=True,
-                    can_send_other_messages=True,
+            muted, until = db_man.effective_mute(chat_id, user_id)
+            if muted:
+                # Verifying the captcha must not lift an active mute — re-apply it instead.
+                await bot.restrict_chat_member(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    permissions=ChatPermissions(can_send_messages=False),
+                    until_date=until or None,
                 )
-            )
+            else:
+                await bot.restrict_chat_member(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    permissions=ChatPermissions(
+                        can_send_messages=True,
+                        can_send_audios=True,
+                        can_send_documents=True,
+                        can_send_photos=True,
+                        can_send_videos=True,
+                        can_send_polls=True,
+                        can_send_other_messages=True,
+                    )
+                )
         except Exception:
             pass
     db_man.clear_pending_chats(user_id)
@@ -69,7 +79,7 @@ async def start_handler(message: types.Message) -> None:
     if message.chat.id < 0:
         return
 
-    if user_id in config.BLOCKLIST:
+    if db_man.is_blocklisted(user_id):
         await message.answer(translator.get_string('blocked_msg'))
         return
 

@@ -33,7 +33,7 @@ async def on_reaction(event: MessageReactionUpdated, bot: Bot):
     user_id = event.user.id
     chat_id = event.chat.id
 
-    if user_id in config.BLOCKLIST:
+    if db_man.is_blocklisted(user_id):
         return
 
     if chat_id not in db_man.get_pending_chats(user_id):

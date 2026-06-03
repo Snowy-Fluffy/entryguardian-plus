@@ -22,6 +22,7 @@ from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import IS_MEMBER, IS_NOT_MEMBER
 from dbmanager import DBManager
 from datetime import datetime
+import asyncio
 import config
 from translator import Translator
 
@@ -34,6 +35,9 @@ bot_username: str | None = None
 
 # user_id → list of (chat_id, message_id) — one entry per chat the user joined
 _welcome_msg_by_user: dict[int, list[tuple[int, int]]] = {}
+
+# chat_id → number of newcomers banned by anti-raid since the last reminder
+_raid_bans: dict[int, int] = {}
 
 
 async def delete_welcome_msg(bot: Bot, user_id: int) -> None:
@@ -51,11 +55,42 @@ async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
     user_id = user.id
     chat_id = event.chat.id
 
-    if user_id in config.BLOCKLIST:
+    db_man.remember_user(user_id, user.username)
+    db_man.remember_chat(chat_id)
+
+    if db_man.is_blocklisted(user_id) and not db_man.is_ban_exception(chat_id, user_id):
         try:
             await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
         except Exception:
             pass
+        return
+
+    # Anti-raid: ban every newcomer locally, silently, without showing the captcha.
+    if db_man.is_raid_mode(chat_id):
+        try:
+            await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+            _raid_bans[chat_id] = _raid_bans.get(chat_id, 0) + 1
+        except Exception:
+            pass
+        return
+
+    # A still-active mute (local or global) must follow the user in — re-apply it, skip the captcha.
+    muted, until = db_man.effective_mute(chat_id, user_id)
+    if muted:
+        try:
+            await bot.restrict_chat_member(
+                chat_id=chat_id,
+                user_id=user_id,
+                permissions=ChatPermissions(can_send_messages=False),
+                until_date=until or None,
+            )
+        except Exception:
+            pass
+        db_man.add_mute(chat_id, user_id, until)  # record per-chat so /ungmute's sweep clears it
+        return
+
+    # The blocklist check above always runs; the captcha itself can be disabled per chat.
+    if not db_man.is_captcha_enabled(chat_id):
         return
 
     if db_man.is_user_allowed(user_id):
@@ -99,3 +134,17 @@ async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
     )
 
     db_man.add_pending_chat(user_id, chat_id)
+
+
+async def raid_reminder_task(bot: Bot) -> None:
+    """Every 5 minutes, remind each anti-raid chat that the mode is on and how many were banned."""
+    while True:
+        await asyncio.sleep(300)
+        for chat_id in db_man.get_raid_chats():
+            count = _raid_bans.pop(chat_id, 0)
+            try:
+                await bot.send_message(chat_id, translator.get_string('raid_reminder').format(count))
+            except Exception:
+                pass
+        # Drop counters for chats that left raid mode so they don't carry stale numbers.
+        _raid_bans.clear()

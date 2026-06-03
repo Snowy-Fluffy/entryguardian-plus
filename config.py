@@ -8,7 +8,7 @@ DB_PATH: str = os.getenv('DB_PATH', 'users.db')
 MAX_ATTEMPTS: int = int(os.getenv('MAX_ATTEMPTS', '3'))
 COOL_DOWN: int = int(os.getenv('COOL_DOWN', '900'))
 LOCALE: str = os.getenv('LOCALE', 'ru_RU')
-BLOCKLIST: set[int] = {int(x.strip()) for x in os.getenv('BLOCKLIST', '').split(',') if x.strip()}
+OWNERS: set[int] = {int(x.strip()) for x in os.getenv('OWNERS', '').split(',') if x.strip()}
 
 WEB_HOST: str = os.getenv('WEB_HOST', '127.0.0.1')
 WEB_PORT: int = int(os.getenv('WEB_PORT', '8080'))
