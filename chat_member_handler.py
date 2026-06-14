@@ -23,6 +23,7 @@ from aiogram.filters import IS_MEMBER, IS_NOT_MEMBER
 from dbmanager import DBManager
 from datetime import datetime
 import asyncio
+import html
 import config
 from translator import Translator
 
@@ -143,7 +144,8 @@ async def raid_reminder_task(bot: Bot) -> None:
         for chat_id in db_man.get_raid_chats():
             count = _raid_bans.pop(chat_id, 0)
             try:
-                await bot.send_message(chat_id, translator.get_string('raid_reminder').format(count))
+                text = html.escape(translator.get_string('raid_reminder').format(count), quote=False)
+                await bot.send_message(chat_id, f'<i>{text}</i>', parse_mode='HTML')
             except Exception:
                 pass
         # Drop counters for chats that left raid mode so they don't carry stale numbers.

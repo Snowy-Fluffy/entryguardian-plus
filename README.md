@@ -86,7 +86,7 @@ The bot has a per-chat role system with three levels:
 | `/ungban` | admins, owners | **Global** unban: remove the user from the blocklist and lift their ban in every chat the bot is in |
 | `/unsban` | admins, owners | **Silent local** unban: same as `/unban`, with nothing posted to the chat |
 | `/unsgban` | admins, owners | **Silent global** unban: same as `/ungban`, with nothing posted to the chat |
-| `/mute [duration] [reason]` | moderators, admins, owners | Mute the target in **this** chat. Duration like `10m`, `1h`, `1d`, `1w` (omit for permanent); reason optional. e.g. `mute @user 10m spam` or reply with `mute 1d` |
+| `/mute [duration] [reason]` | moderators, admins, owners | Mute the target in **this** chat. Duration like `30s`, `10m` (minutes), `1h`, `1d`, `1w`, `2mo` (months — note `mo`, since `m` is minutes); omit for permanent; reason optional. e.g. `mute @user 10m spam` or reply with `mute 1d` |
 | `/gmute` | admins, owners | **Global** mute: mute the target in every chat the bot is in, announced in all of them |
 | `/smute` | admins, owners | **Silent local** mute (no announcement) |
 | `/gsmute` | admins, owners | **Silent global** mute (no announcement) |
@@ -101,14 +101,19 @@ The bot has a per-chat role system with three levels:
 | `/del_adm` | admins, owners | Remove an admin of this chat (the chat creator cannot be removed) |
 | `/add_mod` | admins, owners | Make the target user a moderator of this chat |
 | `/del_mod` | admins, owners | Remove a moderator of this chat |
+| `/report` | everyone | Report a message. Reply to a message with `/report [reason]` to report that message, or send `/report [reason]` on its own for a general report with no specific message indicated. Every owner (from any chat) and the chat's own admins and moderators get a DM from the bot with the chat, who reported (name/@username/id), who was reported and a link to the message plus the message forwarded (when replying), or a note that no specific message was indicated (when not). The bot replies in the chat with an italic "Report sent" |
 | `/rules` | everyone | Show this chat's custom rules (set via the admin panel) |
 | `/staff` | everyone | List the admins and moderators of this chat (owners are not shown) |
 | `/admin` | admins, owners | Open the **admin panel** in a private chat with the bot (see below) |
-| `/help` | moderators, admins, owners | Show the list of available commands |
+| `/help` | everyone | Show the list of available commands |
 
 The target user can be specified by **replying** to their message, or by passing their numeric **ID** (`/ban 123456789`) or **@username** (`/ban @user spam`). Replying or using a numeric ID is the most reliable; `@username` only resolves for users the bot has already seen in a chat (privacy mode must be off) or for public accounts.
 
+**Banning channels:** when someone posts in the group **as a channel**, a normal ban would only hit the anonymous `@Channel_Bot`. Instead, **reply** to the channel's message with `/ban` (or `/gban`, `/sban`, `/sgban`) and the bot bans the *channel sender* itself (and `/unban` … `/unsgban` reverse it). Global channel bans are remembered and re-applied in every chat the bot guards, just like user bans. Channels can't be muted (Telegram has no such action) — the bot tells you to ban instead — and can't be given a staff role.
+
 Command messages are deleted automatically after they are processed (the bot needs the *delete messages* admin right for this).
+
+Punishment announcements (bans, mutes, unbans, unmutes) are posted in italics and name both the staff member and the target as clickable mentions followed by their numeric id; mute durations are spelled out (e.g. `5 hours` rather than `5h`).
 
 ### Admin panel (`/admin`)
 
@@ -117,18 +122,22 @@ Sent in a **private chat** with the bot, `/admin` opens an inline-button panel. 
 - pick a chat (when you manage more than one);
 - see its admins and moderators;
 - add or remove an admin or a moderator (the bot asks for the target's `@username` or ID);
-- view that chat's staff action log;
+- view that chat's staff action log — the full history is kept and shown newest-first, paged (with ◀️/▶️ buttons), and searchable (🔍) by any text such as a name, id or action;
 - set or clear that chat's custom rules (shown in-chat via `/rules`);
 - toggle the captcha for that chat. When the captcha is off, new members can write immediately without solving it — but the blocklist ID check on join still always runs;
-- toggle anti-raid for that chat (same effect as `/raid_on` / `/raid_off`).
+- toggle anti-raid for that chat (same effect as `/raid_on` / `/raid_off`);
+- toggle **"channels forbidden"** for that chat (off by default). When on, any message posted on behalf of a channel is deleted and that channel is banned, with a "Channels are forbidden in this chat" notice. A linked channel's auto-forwarded posts are left alone;
+- manage the **rights granted to users after they pass the captcha** — toggle each permission individually (send messages, send media, stickers/GIFs, polls, link previews, and *edit own tag* — the `can_edit_tag` right from Bot API 9.5, shown only if the installed aiogram supports it). Unmuting a user restores this same set. By default members get the sending rights; "edit own tag" is off until enabled. Admin-type rights (adding members, pinning, changing chat info) are never granted here.
 
-Owners additionally get two owner-only controls in the panel: stopping/resuming a chat (the bot ignores all commands from it) and a **global command ban** — a denylist of users who are completely forbidden from using any bot command (except `/start`) and the admin panel everywhere, even if they are admins or moderators (owners can't be added).
+Owners additionally get owner-only controls in the panel: stopping/resuming a chat (the bot ignores all commands from it), a **global command ban** — a denylist of users who are completely forbidden from using any bot command (except `/start`) and the admin panel everywhere, even if they are admins or moderators (owners can't be added) — and a **Leave chat** button (with a confirmation) that makes the bot leave that chat. Owners can also make the bot leave from inside a group with the hidden `/leavechat` command.
 
-The staff action log keeps the **last 200 actions per chat** (bans, unbans, role changes). Owner actions are **not** logged.
+The staff action log keeps the **full history per chat** (bans, unbans, mutes, role changes, etc.) — it is no longer capped. In the panel it is paginated and searchable, and each entry is timestamped with the full date including the year. Owner actions are **not** logged.
 
 ### Blocklist
 
-There is no `BLOCKLIST` env variable anymore. The blocklist lives in the database and is populated by `/gban` and `/sgban`. Anyone on the blocklist is banned automatically when they try to join any chat the bot guards. Because Telegram does not let a bot enumerate a group's existing members when it is added, a blocklisted user who is *already* in a newly-added chat is banned as soon as they are next active (send a message), provided the bot is an admin there and privacy mode is off.
+There is no `BLOCKLIST` env variable anymore. The blocklist lives in the database and is populated by `/gban` and `/sgban`. Anyone on the blocklist is banned automatically when they try to join any chat the bot guards. The bot enforces the blocklist on a new chat **automatically**: when it is added to a chat, and again when it is promoted to administrator (the point at which it first gains ban rights), it silently sweeps the whole blocklist over that chat — a preemptive ban works by user id even for members the Bot API can't enumerate, so blocklisted users who were already in the chat are banned without waiting for them to speak. The same sweep also runs the first time the bot sees a chat it was already in before this version was deployed (revealed by the first message there).
+
+As a safety net, a blocklisted user who somehow slips through is still banned as soon as they are next active (send a message), provided the bot is an admin there and privacy mode is off.
 
 > The bot can only enumerate chats it has observed *after* this version was deployed (Telegram does not expose the full list of a bot's chats). Re-adding the bot, or any message in a group, registers that chat for global bans.
 

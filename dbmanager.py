@@ -57,6 +57,14 @@ class DBManager:
 			self.cursor.execute('CREATE TABLE cooldown_use(chat_id INTEGER, user_id INTEGER, command TEXT, last_ts INTEGER, UNIQUE(chat_id, user_id, command))')
 		if 'command_banned' not in tables:
 			self.cursor.execute('CREATE TABLE command_banned(user_id INTEGER PRIMARY KEY)')
+		if 'channel_blocklist' not in tables:
+			self.cursor.execute('CREATE TABLE channel_blocklist(channel_id INTEGER PRIMARY KEY)')
+		if 'channel_ban_exceptions' not in tables:
+			self.cursor.execute('CREATE TABLE channel_ban_exceptions(chat_id INTEGER, channel_id INTEGER, UNIQUE(chat_id, channel_id))')
+		if 'channels_banned' not in tables:
+			self.cursor.execute('CREATE TABLE channels_banned(chat_id INTEGER PRIMARY KEY)')
+		if 'chat_perms' not in tables:
+			self.cursor.execute('CREATE TABLE chat_perms(chat_id INTEGER PRIMARY KEY, perms TEXT)')
 		self.connection.commit()
 
 	def unix_time(self):
@@ -198,9 +206,15 @@ class DBManager:
 	def is_blocklisted(self, user_id):
 		return bool(self.cursor.execute('SELECT 1 FROM blocklist WHERE user_id=?', (user_id,)).fetchone())
 
+	def get_blocklist(self):
+		return [row[0] for row in self.cursor.execute('SELECT user_id FROM blocklist').fetchall()]
+
 	def remember_chat(self, chat_id):
+		"""Record a chat the bot is in. Returns True if this chat was not known before."""
 		self.cursor.execute('INSERT OR IGNORE INTO bot_chats(chat_id) VALUES (?)', (chat_id,))
+		newly_added = self.cursor.rowcount > 0
 		self.connection.commit()
+		return newly_added
 
 	def forget_chat(self, chat_id):
 		self.cursor.execute('DELETE FROM bot_chats WHERE chat_id=?', (chat_id,))
@@ -224,23 +238,70 @@ class DBManager:
 		self.cursor.execute('DELETE FROM ban_exceptions WHERE user_id=?', (user_id,))
 		self.connection.commit()
 
+	# Channels that post on their own behalf are punished as "sender chats", so they get a
+	# parallel blocklist / exception scheme that mirrors the per-user one above.
+	def add_channel_to_blocklist(self, channel_id):
+		self.cursor.execute('INSERT OR IGNORE INTO channel_blocklist(channel_id) VALUES (?)', (channel_id,))
+		self.connection.commit()
+
+	def remove_channel_from_blocklist(self, channel_id):
+		self.cursor.execute('DELETE FROM channel_blocklist WHERE channel_id=?', (channel_id,))
+		self.connection.commit()
+
+	def is_channel_blocklisted(self, channel_id):
+		return bool(self.cursor.execute('SELECT 1 FROM channel_blocklist WHERE channel_id=?', (channel_id,)).fetchone())
+
+	def get_channel_blocklist(self):
+		return [row[0] for row in self.cursor.execute('SELECT channel_id FROM channel_blocklist').fetchall()]
+
+	def add_channel_ban_exception(self, chat_id, channel_id):
+		self.cursor.execute('INSERT OR IGNORE INTO channel_ban_exceptions(chat_id, channel_id) VALUES (?, ?)', (chat_id, channel_id))
+		self.connection.commit()
+
+	def is_channel_ban_exception(self, chat_id, channel_id):
+		return bool(self.cursor.execute('SELECT 1 FROM channel_ban_exceptions WHERE chat_id=? AND channel_id=?', (chat_id, channel_id)).fetchone())
+
+	def clear_channel_ban_exceptions(self, channel_id):
+		self.cursor.execute('DELETE FROM channel_ban_exceptions WHERE channel_id=?', (channel_id,))
+		self.connection.commit()
+
+	# Per-chat "forbid all channels" mode (off by default): channels that post get banned.
+	def set_channels_banned(self, chat_id, enabled):
+		if enabled:
+			self.cursor.execute('INSERT OR IGNORE INTO channels_banned(chat_id) VALUES (?)', (chat_id,))
+		else:
+			self.cursor.execute('DELETE FROM channels_banned WHERE chat_id=?', (chat_id,))
+		self.connection.commit()
+
+	def is_channels_banned(self, chat_id):
+		return bool(self.cursor.execute('SELECT 1 FROM channels_banned WHERE chat_id=?', (chat_id,)).fetchone())
+
+	# Per-chat set of permissions granted to verified users (None = use the bot's default set).
+	def get_chat_perms(self, chat_id):
+		row = self.cursor.execute('SELECT perms FROM chat_perms WHERE chat_id=?', (chat_id,)).fetchone()
+		if row is None:
+			return None
+		return [p for p in row[0].split(',') if p]
+
+	def set_chat_perms(self, chat_id, perms):
+		self.cursor.execute('INSERT OR REPLACE INTO chat_perms(chat_id, perms) VALUES (?, ?)',
+			(chat_id, ','.join(perms)))
+		self.connection.commit()
+
 	def add_log(self, chat_id, text):
+		# History is kept in full (no trimming) so it can be searched and paged through.
 		self.cursor.execute(
 			'INSERT INTO action_log(chat_id, ts, text) VALUES (?, ?, ?)',
 			(chat_id, self.unix_time(), text)
 		)
-		# Keep only the most recent 200 staff actions per chat.
-		self.cursor.execute(
-			'DELETE FROM action_log WHERE chat_id=? AND id NOT IN '
-			'(SELECT id FROM action_log WHERE chat_id=? ORDER BY id DESC LIMIT 200)',
-			(chat_id, chat_id)
-		)
 		self.connection.commit()
 
-	def get_logs(self, chat_id, limit=200):
+	def get_logs(self, chat_id):
+		# Whole history, newest first. Search/paging is done by the caller so Cyrillic
+		# case-folding works (SQLite's LIKE/LOWER only fold ASCII).
 		return self.cursor.execute(
-			'SELECT ts, text FROM action_log WHERE chat_id=? ORDER BY id DESC LIMIT ?',
-			(chat_id, limit)
+			'SELECT ts, text FROM action_log WHERE chat_id=? ORDER BY id DESC',
+			(chat_id,)
 		).fetchall()
 
 	def set_captcha_enabled(self, chat_id, enabled):
