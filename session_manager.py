@@ -77,11 +77,9 @@ def register_kill(session_id: str, challenge: str) -> bool:
         return False
     now = time.time()
     captcha_type = session.get('captcha_type')
-    # Tetris pieces can only be placed once each — no cooldown needed
     if captcha_type != 'tetris':
         if now - session['last_kill_at'] < config.KILL_COOLDOWN:
             return False
-    # Mario: flagpole must be reached at least MARIO_MIN_PLAY_TIME seconds after page load
     if captcha_type == 'mario':
         page_loaded_at = session.get('page_loaded_at') or 0
         if now - page_loaded_at < config.MARIO_MIN_PLAY_TIME:

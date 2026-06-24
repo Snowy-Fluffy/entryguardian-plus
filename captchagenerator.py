@@ -1,18 +1,6 @@
-# Entry Guardian - a Telegram bot that prevents spam bots from joining a group
-# Copyright: 2025 Entry Guardian Dev Team
 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
 
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import random
 import string
@@ -21,9 +9,7 @@ from collections import namedtuple
 from PIL import Image, ImageDraw, ImageFont
 import tempfile
 
-# solution is always a string; comparison is case-insensitive
 Captcha = namedtuple('Captcha', 'problem solution')
-# hint_key maps to a string in the l10n file
 Result = namedtuple('Result', 'filename solution hint_key')
 
 RED_FACTOR = 0.299
@@ -80,7 +66,6 @@ class CaptchaGenerator:
                 if random.random() < level / 100:
                     draw.point((i, j), fill=noise_color)
 
-    # --- text-based captcha renderer (math / text / sequence) ---
     def _render_text_captcha(self, captcha: Captcha, hint_key: str) -> Result:
         bg_color = self.random_color()
         fg_color = self._contrasting_color(bg_color)
@@ -101,7 +86,6 @@ class CaptchaGenerator:
         image.save(path)
         return Result(path, captcha.solution, hint_key)
 
-    # --- shapes captcha: count the circles ---
     def _render_shapes_captcha(self) -> Result:
         count = random.randint(3, 9)
         bg_color = self.random_color()
@@ -121,7 +105,6 @@ class CaptchaGenerator:
             if all((x - px) ** 2 + (y - py) ** 2 > min_dist_sq for px, py in positions):
                 positions.append((x, y))
                 fill = self.random_color()
-                # Make sure fill is distinguishable from background
                 while abs(self.luminance(fill) - self.luminance(bg_color)) < 60:
                     fill = self.random_color()
                 outline = self._contrasting_color(fill)
@@ -134,14 +117,12 @@ class CaptchaGenerator:
                 placed += 1
             attempts += 1
 
-        # Light noise so circles stay clearly visible
         self._add_noise(draw, self.random_color(), level=config.NOISE_LEVEL // 3)
 
         _, path = tempfile.mkstemp(suffix='.png')
         image.save(path)
         return Result(path, str(placed), 'hint_shapes')
 
-    # --- public entry point ---
     def generate_picture(self) -> Result:
         captcha_type = random.choice(('math', 'text', 'sequence', 'shapes'))
 

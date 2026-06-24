@@ -12,7 +12,7 @@ The captcha type is chosen randomly from the enabled types: **DOOM** (shoot N en
 4. On completion the page shows an 8-character code.
 5. The user sends the code to the bot → bot verifies it, unmutes the user in all pending chats, and deletes the welcome message.
 
-Sessions expire after 10 minutes. Failed code attempts are limited; too many wrong attempts result in a temporary block.
+Sessions expire after 10 minutes. Failed code attempts are limited; too many wrong attempts result in a temporary block. A newcomer who never passes the captcha within **24 hours** is kicked from the chat (and immediately unbanned, so they can rejoin and try again). This 24h kick is on by default and can be turned off per chat from the admin panel. The unban half of a kick is recorded in a persistent queue and retried (honouring rate-limit `Retry-After`) until it succeeds, so a failed/rate-limited unban — or a restart mid-kick — never leaves someone stuck banned. Re-joining within an hour of the last prompt doesn't re-post the welcome message, to avoid spam.
 
 ## Captcha types
 
@@ -95,6 +95,7 @@ The bot has a per-chat role system with three levels:
 | `/unsmute` | admins, owners | **Silent local** unmute |
 | `/ungsmute` | admins, owners | **Silent global** unmute |
 | `/delete` | moderators, admins, owners | Delete the message this command **replies to** (and the command itself). Telegram only lets bots delete messages up to 48h old |
+| `/punl` | moderators, admins, owners (in a group); admins/owners (in DM) | Show a user's **punishment history** (bans, mutes, their reversals, deletions). Target by reply, ID or @username. In a group it covers that chat; sent in DM it aggregates across every chat the requester manages, labelling each entry with its chat |
 | `/raid_on` | admins, owners | Enable **anti-raid** in this chat: every newcomer is locally banned, silently, with no captcha shown. The blocklist ID check still runs. While on, the bot posts a reminder every 5 minutes with how many were banned, so it isn't left on by accident |
 | `/raid_off` | admins, owners | Disable anti-raid |
 | `/add_adm` | admins, owners | Make the target user an admin of this chat |
@@ -107,13 +108,13 @@ The bot has a per-chat role system with three levels:
 | `/admin` | admins, owners | Open the **admin panel** in a private chat with the bot (see below) |
 | `/help` | everyone | Show the list of available commands |
 
-The target user can be specified by **replying** to their message, or by passing their numeric **ID** (`/ban 123456789`) or **@username** (`/ban @user spam`). Replying or using a numeric ID is the most reliable; `@username` only resolves for users the bot has already seen in a chat (privacy mode must be off) or for public accounts.
+The target user can be specified by **replying** to their message, or by passing their numeric **ID** (`/ban 123456789`) or **@username** (`/ban @user spam`). Replying or using a numeric ID is the most reliable. An `@username` is first resolved **live** through Telegram (`getChat`) — which works for channels and public groups but **not for regular users** (the Bot API can't turn a user's @username into an id). For users, the bot falls back to its id↔username/display-name **cache** (filled from observed messages and live lookups; reassignments are tracked, and all values are bound as query parameters so a name can never inject SQL). So `@username` resolves a user only if the bot has seen them; there is a small window where a freshly-reassigned username could still point at the previous owner until the new one is seen — reply or numeric ID avoid this entirely.
 
 **Banning channels:** when someone posts in the group **as a channel**, a normal ban would only hit the anonymous `@Channel_Bot`. Instead, **reply** to the channel's message with `/ban` (or `/gban`, `/sban`, `/sgban`) and the bot bans the *channel sender* itself (and `/unban` … `/unsgban` reverse it). Global channel bans are remembered and re-applied in every chat the bot guards, just like user bans. Channels can't be muted (Telegram has no such action) — the bot tells you to ban instead — and can't be given a staff role.
 
 Command messages are deleted automatically after they are processed (the bot needs the *delete messages* admin right for this).
 
-Punishment announcements (bans, mutes, unbans, unmutes) are posted in italics and name both the staff member and the target as clickable mentions followed by their numeric id; mute durations are spelled out (e.g. `5 hours` rather than `5h`).
+Punishment announcements (bans, mutes, unbans, unmutes) are posted in italics and always show the staff member and the target with their numeric id. When a target is given by a bare **ID**, the bot looks the person up across every chat it's in (then its local cache) to show a real display name instead of just the number; the name links to the public profile (`t.me/username`) when the account has one, and falls back to plain `display name (id …)` or a bare `id …` when nothing is known. Mute durations are spelled out (e.g. `5 hours` rather than `5h`).
 
 ### Admin panel (`/admin`)
 
@@ -126,12 +127,14 @@ Sent in a **private chat** with the bot, `/admin` opens an inline-button panel. 
 - set or clear that chat's custom rules (shown in-chat via `/rules`);
 - toggle the captcha for that chat. When the captcha is off, new members can write immediately without solving it — but the blocklist ID check on join still always runs;
 - toggle anti-raid for that chat (same effect as `/raid_on` / `/raid_off`);
+- toggle the **24-hour kick** for that chat — whether users who don't pass the captcha within 24h are kicked (on by default);
 - toggle **"channels forbidden"** for that chat (off by default). When on, any message posted on behalf of a channel is deleted and that channel is banned, with a "Channels are forbidden in this chat" notice. A linked channel's auto-forwarded posts are left alone;
 - manage the **rights granted to users after they pass the captcha** — toggle each permission individually (send messages, send media, stickers/GIFs, polls, link previews, and *edit own tag* — the `can_edit_tag` right from Bot API 9.5, shown only if the installed aiogram supports it). Unmuting a user restores this same set. By default members get the sending rights; "edit own tag" is off until enabled. Admin-type rights (adding members, pinning, changing chat info) are never granted here.
+- view the **global ban list** — a paged, read-only list of every blocklisted user and channel (those banned via `/gban` / `/sgban`). Removal is still done with `/ungban`.
 
 Owners additionally get owner-only controls in the panel: stopping/resuming a chat (the bot ignores all commands from it), a **global command ban** — a denylist of users who are completely forbidden from using any bot command (except `/start`) and the admin panel everywhere, even if they are admins or moderators (owners can't be added) — and a **Leave chat** button (with a confirmation) that makes the bot leave that chat. Owners can also make the bot leave from inside a group with the hidden `/leavechat` command.
 
-The staff action log keeps the **full history per chat** (bans, unbans, mutes, role changes, etc.) — it is no longer capped. In the panel it is paginated and searchable, and each entry is timestamped with the full date including the year. Owner actions are **not** logged.
+The staff action log keeps the **full history per chat** (bans, unbans, mutes, role changes, etc.) — it is no longer capped. In the panel it is paginated and searchable, and each entry is timestamped with the full date including the year. Owner actions are logged too, but the log only ever records an actor's name and id (never a role), so a bot owner appears there indistinguishable from a regular administrator.
 
 ### Blocklist
 

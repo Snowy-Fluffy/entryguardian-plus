@@ -9,10 +9,6 @@ DOOM_DIR = os.path.realpath(
 )
 _TEMPLATE_PATH = os.path.join(os.path.dirname(__file__), 'templates', 'captcha_wrapper.html')
 
-# Only these file types may be served as captcha assets. DOOM_DIR is the project
-# root, which also holds .env, the SQLite DB and the source code — without this
-# allowlist, requests like /doom/.env or /mario/users.db would leak secrets.
-# The path-traversal guard below blocks escaping DOOM_DIR; this guards what's inside it.
 _ALLOWED_ASSET_EXTS = frozenset({
     '.html', '.js', '.css', '.ico', '.png', '.jpg', '.jpeg',
     '.gif', '.svg', '.webp', '.wav', '.mp3', '.ogg', '.woff', '.woff2', '.ttf',
@@ -136,10 +132,8 @@ async def handle_complete(request: web.Request) -> web.Response:
 async def handle_doom_file(request: web.Request) -> web.FileResponse:
     rel_path = request.match_info['path']
     full_path = os.path.realpath(os.path.join(DOOM_DIR, rel_path))
-    # Prevent path traversal outside DOOM_DIR
     if not full_path.startswith(DOOM_DIR + os.sep) and full_path != DOOM_DIR:
         raise web.HTTPForbidden()
-    # Only static captcha assets may be served — never .env, the DB or source files.
     if os.path.splitext(full_path)[1].lower() not in _ALLOWED_ASSET_EXTS:
         raise web.HTTPForbidden()
     if not os.path.isfile(full_path):

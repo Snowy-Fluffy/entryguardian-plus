@@ -1,18 +1,6 @@
-# Entry Guardian - a Telegram bot that prevents spam bots from joining a group
-# Copyright: 2025 Entry Guardian Dev Team
 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
 
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import sqlite3
 import config
@@ -26,11 +14,11 @@ class DBManager:
 		if 'user' not in tables:
 			self.cursor.execute('CREATE TABLE user(id, verified, blocked_until)')
 		if 'pending_chats' not in tables:
-			self.cursor.execute('CREATE TABLE pending_chats(user_id INTEGER, chat_id INTEGER)')
+			self.cursor.execute('CREATE TABLE pending_chats(user_id INTEGER, chat_id INTEGER, since INTEGER)')
 		if 'roles' not in tables:
 			self.cursor.execute('CREATE TABLE roles(chat_id INTEGER, user_id INTEGER, role TEXT, UNIQUE(chat_id, user_id))')
 		if 'seen_users' not in tables:
-			self.cursor.execute('CREATE TABLE seen_users(user_id INTEGER PRIMARY KEY, username TEXT)')
+			self.cursor.execute('CREATE TABLE seen_users(user_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT)')
 		if 'blocklist' not in tables:
 			self.cursor.execute('CREATE TABLE blocklist(user_id INTEGER PRIMARY KEY)')
 		if 'bot_chats' not in tables:
@@ -38,9 +26,13 @@ class DBManager:
 		if 'ban_exceptions' not in tables:
 			self.cursor.execute('CREATE TABLE ban_exceptions(chat_id INTEGER, user_id INTEGER, UNIQUE(chat_id, user_id))')
 		if 'action_log' not in tables:
-			self.cursor.execute('CREATE TABLE action_log(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, ts INTEGER, text TEXT)')
+			self.cursor.execute('CREATE TABLE action_log(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, ts INTEGER, text TEXT, target_id INTEGER, action_key TEXT)')
 		if 'captcha_disabled' not in tables:
 			self.cursor.execute('CREATE TABLE captcha_disabled(chat_id INTEGER PRIMARY KEY)')
+		if 'kick_disabled' not in tables:
+			self.cursor.execute('CREATE TABLE kick_disabled(chat_id INTEGER PRIMARY KEY)')
+		if 'pending_unbans' not in tables:
+			self.cursor.execute('CREATE TABLE pending_unbans(chat_id INTEGER, user_id INTEGER, next_ts INTEGER, UNIQUE(chat_id, user_id))')
 		if 'raid_mode' not in tables:
 			self.cursor.execute('CREATE TABLE raid_mode(chat_id INTEGER PRIMARY KEY)')
 		if 'chat_rules' not in tables:
@@ -65,6 +57,19 @@ class DBManager:
 			self.cursor.execute('CREATE TABLE channels_banned(chat_id INTEGER PRIMARY KEY)')
 		if 'chat_perms' not in tables:
 			self.cursor.execute('CREATE TABLE chat_perms(chat_id INTEGER PRIMARY KEY, perms TEXT)')
+		log_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(action_log)').fetchall()}
+		if 'target_id' not in log_cols:
+			self.cursor.execute('ALTER TABLE action_log ADD COLUMN target_id INTEGER')
+		if 'action_key' not in log_cols:
+			self.cursor.execute('ALTER TABLE action_log ADD COLUMN action_key TEXT')
+		seen_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(seen_users)').fetchall()}
+		if 'display_name' not in seen_cols:
+			self.cursor.execute('ALTER TABLE seen_users ADD COLUMN display_name TEXT')
+		pending_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(pending_chats)').fetchall()}
+		if 'since' not in pending_cols:
+			self.cursor.execute('ALTER TABLE pending_chats ADD COLUMN since INTEGER')
+			self.cursor.execute('UPDATE pending_chats SET since=? WHERE since IS NULL', (self.unix_time(),))
+		self.cursor.execute('DROP TABLE IF EXISTS welcome_log')
 		self.connection.commit()
 
 	def unix_time(self):
@@ -108,8 +113,8 @@ class DBManager:
 		).fetchone()
 		if not existing:
 			self.cursor.execute(
-				'INSERT INTO pending_chats VALUES (?, ?)',
-				(user_id, chat_id)
+				'INSERT INTO pending_chats(user_id, chat_id, since) VALUES (?, ?, ?)',
+				(user_id, chat_id, self.unix_time())
 			)
 			self.connection.commit()
 
@@ -130,6 +135,33 @@ class DBManager:
 	def clear_pending_chats(self, user_id):
 		self.cursor.execute('DELETE FROM pending_chats WHERE user_id=?', (user_id,))
 		self.connection.commit()
+
+	def set_pending_since(self, chat_id, user_id):
+		now = self.unix_time()
+		updated = self.cursor.execute(
+			'UPDATE pending_chats SET since=? WHERE user_id=? AND chat_id=?',
+			(now, user_id, chat_id)
+		).rowcount
+		if not updated:
+			self.cursor.execute(
+				'INSERT INTO pending_chats(user_id, chat_id, since) VALUES (?, ?, ?)',
+				(user_id, chat_id, now)
+			)
+		self.connection.commit()
+
+	def welcome_within(self, chat_id, user_id, period):
+		row = self.cursor.execute(
+			'SELECT since FROM pending_chats WHERE user_id=? AND chat_id=?',
+			(user_id, chat_id)
+		).fetchone()
+		return bool(row) and row[0] is not None and row[0] > self.unix_time() - period
+
+	def get_expired_pending(self, max_age):
+		cutoff = self.unix_time() - max_age
+		return self.cursor.execute(
+			'SELECT user_id, chat_id FROM pending_chats WHERE since IS NOT NULL AND since < ?',
+			(cutoff,)
+		).fetchall()
 
 	def set_role(self, chat_id, user_id, role):
 		self.cursor.execute(
@@ -171,19 +203,21 @@ class DBManager:
 			(chat_id,)
 		).fetchall()
 
-	def remember_user(self, user_id, username):
-		if not username:
+	def remember_user(self, user_id, username=None, display_name=None):
+		username = username.lstrip('@').lower() if username else None
+		if not username and not display_name:
 			return
-		username = username.lstrip('@').lower()
-		# A username can move between accounts; drop it from any stale row first.
+		if username:
+			self.cursor.execute(
+				'UPDATE seen_users SET username=NULL WHERE username=? AND user_id<>?',
+				(username, user_id)
+			)
 		self.cursor.execute(
-			'UPDATE seen_users SET username=NULL WHERE username=? AND user_id<>?',
-			(username, user_id)
-		)
-		self.cursor.execute(
-			'INSERT INTO seen_users(user_id, username) VALUES (?, ?) '
-			'ON CONFLICT(user_id) DO UPDATE SET username=excluded.username',
-			(user_id, username)
+			'INSERT INTO seen_users(user_id, username, display_name) VALUES (?, ?, ?) '
+			'ON CONFLICT(user_id) DO UPDATE SET '
+			'username=COALESCE(excluded.username, seen_users.username), '
+			'display_name=COALESCE(excluded.display_name, seen_users.display_name)',
+			(user_id, username, display_name)
 		)
 		self.connection.commit()
 
@@ -194,6 +228,13 @@ class DBManager:
 			(username,)
 		).fetchone()
 		return row[0] if row else None
+
+	def find_user_by_id(self, user_id):
+		row = self.cursor.execute(
+			'SELECT username, display_name FROM seen_users WHERE user_id=?',
+			(user_id,)
+		).fetchone()
+		return (row[0], row[1]) if row else None
 
 	def add_to_blocklist(self, user_id):
 		self.cursor.execute('INSERT OR IGNORE INTO blocklist(user_id) VALUES (?)', (user_id,))
@@ -238,8 +279,6 @@ class DBManager:
 		self.cursor.execute('DELETE FROM ban_exceptions WHERE user_id=?', (user_id,))
 		self.connection.commit()
 
-	# Channels that post on their own behalf are punished as "sender chats", so they get a
-	# parallel blocklist / exception scheme that mirrors the per-user one above.
 	def add_channel_to_blocklist(self, channel_id):
 		self.cursor.execute('INSERT OR IGNORE INTO channel_blocklist(channel_id) VALUES (?)', (channel_id,))
 		self.connection.commit()
@@ -265,7 +304,6 @@ class DBManager:
 		self.cursor.execute('DELETE FROM channel_ban_exceptions WHERE channel_id=?', (channel_id,))
 		self.connection.commit()
 
-	# Per-chat "forbid all channels" mode (off by default): channels that post get banned.
 	def set_channels_banned(self, chat_id, enabled):
 		if enabled:
 			self.cursor.execute('INSERT OR IGNORE INTO channels_banned(chat_id) VALUES (?)', (chat_id,))
@@ -276,7 +314,6 @@ class DBManager:
 	def is_channels_banned(self, chat_id):
 		return bool(self.cursor.execute('SELECT 1 FROM channels_banned WHERE chat_id=?', (chat_id,)).fetchone())
 
-	# Per-chat set of permissions granted to verified users (None = use the bot's default set).
 	def get_chat_perms(self, chat_id):
 		row = self.cursor.execute('SELECT perms FROM chat_perms WHERE chat_id=?', (chat_id,)).fetchone()
 		if row is None:
@@ -288,20 +325,23 @@ class DBManager:
 			(chat_id, ','.join(perms)))
 		self.connection.commit()
 
-	def add_log(self, chat_id, text):
-		# History is kept in full (no trimming) so it can be searched and paged through.
+	def add_log(self, chat_id, text, target_id=None, action_key=None):
 		self.cursor.execute(
-			'INSERT INTO action_log(chat_id, ts, text) VALUES (?, ?, ?)',
-			(chat_id, self.unix_time(), text)
+			'INSERT INTO action_log(chat_id, ts, text, target_id, action_key) VALUES (?, ?, ?, ?, ?)',
+			(chat_id, self.unix_time(), text, target_id, action_key)
 		)
 		self.connection.commit()
 
 	def get_logs(self, chat_id):
-		# Whole history, newest first. Search/paging is done by the caller so Cyrillic
-		# case-folding works (SQLite's LIKE/LOWER only fold ASCII).
 		return self.cursor.execute(
 			'SELECT ts, text FROM action_log WHERE chat_id=? ORDER BY id DESC',
 			(chat_id,)
+		).fetchall()
+
+	def get_punishments(self, target_id):
+		return self.cursor.execute(
+			'SELECT chat_id, ts, action_key, text FROM action_log WHERE target_id=? ORDER BY id DESC',
+			(target_id,)
 		).fetchall()
 
 	def set_captcha_enabled(self, chat_id, enabled):
@@ -313,6 +353,32 @@ class DBManager:
 
 	def is_captcha_enabled(self, chat_id):
 		return not bool(self.cursor.execute('SELECT 1 FROM captcha_disabled WHERE chat_id=?', (chat_id,)).fetchone())
+
+	def set_kick_enabled(self, chat_id, enabled):
+		if enabled:
+			self.cursor.execute('DELETE FROM kick_disabled WHERE chat_id=?', (chat_id,))
+		else:
+			self.cursor.execute('INSERT OR IGNORE INTO kick_disabled(chat_id) VALUES (?)', (chat_id,))
+		self.connection.commit()
+
+	def is_kick_enabled(self, chat_id):
+		return not bool(self.cursor.execute('SELECT 1 FROM kick_disabled WHERE chat_id=?', (chat_id,)).fetchone())
+
+	def add_pending_unban(self, chat_id, user_id, next_ts):
+		self.cursor.execute(
+			'INSERT OR REPLACE INTO pending_unbans(chat_id, user_id, next_ts) VALUES (?, ?, ?)',
+			(chat_id, user_id, next_ts)
+		)
+		self.connection.commit()
+
+	def remove_pending_unban(self, chat_id, user_id):
+		self.cursor.execute('DELETE FROM pending_unbans WHERE chat_id=? AND user_id=?', (chat_id, user_id))
+		self.connection.commit()
+
+	def get_due_unbans(self, now):
+		return self.cursor.execute(
+			'SELECT chat_id, user_id FROM pending_unbans WHERE next_ts <= ?', (now,)
+		).fetchall()
 
 	def set_raid_mode(self, chat_id, on):
 		if on:
@@ -343,7 +409,6 @@ class DBManager:
 		return row[0] if row else None
 
 	def add_mute(self, chat_id, user_id, until):
-		# until == 0 means a permanent mute.
 		self.cursor.execute(
 			'INSERT INTO mutes(chat_id, user_id, until) VALUES (?, ?, ?) '
 			'ON CONFLICT(chat_id, user_id) DO UPDATE SET until=excluded.until',
@@ -360,7 +425,7 @@ class DBManager:
 		if not row:
 			return False
 		until = row[0]
-		if until and until <= self.unix_time():  # expired — clean it up
+		if until and until <= self.unix_time():
 			self.remove_mute(chat_id, user_id)
 			return False
 		return True

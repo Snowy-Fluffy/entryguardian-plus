@@ -1,18 +1,6 @@
-# Entry Guardian - a Telegram bot that prevents spam bots from joining a group
-# Copyright: 2025 Entry Guardian Dev Team
 
-# This program is free software: you can redistribute it and/or modify
-# it under the terms of the GNU General Public License as published by
-# the Free Software Foundation, either version 3 of the License, or
-# (at your option) any later version.
 
-# This program is distributed in the hope that it will be useful,
-# but WITHOUT ANY WARRANTY; without even the implied warranty of
-# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE. See the
-# GNU General Public License for more details.
 
-# You should have received a copy of the GNU General Public License
-# along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 from aiogram import Bot, Dispatcher
 import asyncio
@@ -43,6 +31,8 @@ async def main():
         webserver.start_server(),
         personal_msg_handler.session_expiry_task(bot),
         chat_member_handler.raid_reminder_task(bot),
+        chat_member_handler.captcha_timeout_task(bot),
+        chat_member_handler.pending_unban_retry_task(bot),
     )
 
 
