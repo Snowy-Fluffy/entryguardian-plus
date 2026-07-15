@@ -24,5 +24,5 @@ class Translator:
 			self.locale = json.load(file)
 	
 	def get_string(self, string_id):
-		return self.locale.get(string_id, '<no_such_string>')
+		return self.locale.get(string_id, string_id)
 

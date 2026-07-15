@@ -30,7 +30,7 @@ class DBManager:
 		if 'roles' not in tables:
 			self.cursor.execute('CREATE TABLE roles(chat_id INTEGER, user_id INTEGER, role TEXT, UNIQUE(chat_id, user_id))')
 		if 'seen_users' not in tables:
-			self.cursor.execute('CREATE TABLE seen_users(user_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT)')
+			self.cursor.execute('CREATE TABLE seen_users(user_id INTEGER PRIMARY KEY, username TEXT, display_name TEXT, first_seen INTEGER)')
 		if 'blocklist' not in tables:
 			self.cursor.execute('CREATE TABLE blocklist(user_id INTEGER PRIMARY KEY)')
 		if 'bot_chats' not in tables:
@@ -77,6 +77,9 @@ class DBManager:
 		seen_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(seen_users)').fetchall()}
 		if 'display_name' not in seen_cols:
 			self.cursor.execute('ALTER TABLE seen_users ADD COLUMN display_name TEXT')
+		if 'first_seen' not in seen_cols:
+			self.cursor.execute('ALTER TABLE seen_users ADD COLUMN first_seen INTEGER')
+			self.cursor.execute('UPDATE seen_users SET first_seen=? WHERE first_seen IS NULL', (self.unix_time(),))
 		pending_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(pending_chats)').fetchall()}
 		if 'since' not in pending_cols:
 			self.cursor.execute('ALTER TABLE pending_chats ADD COLUMN since INTEGER')
@@ -209,6 +212,12 @@ class DBManager:
 			(user_id,)
 		).fetchall()]
 
+	def get_moderator_chats(self, user_id):
+		return [row[0] for row in self.cursor.execute(
+			"SELECT chat_id FROM roles WHERE user_id=? AND role='moderator'",
+			(user_id,)
+		).fetchall()]
+
 	def list_roles(self, chat_id):
 		return self.cursor.execute(
 			'SELECT user_id, role FROM roles WHERE chat_id=?',
@@ -225,13 +234,48 @@ class DBManager:
 				(username, user_id)
 			)
 		self.cursor.execute(
-			'INSERT INTO seen_users(user_id, username, display_name) VALUES (?, ?, ?) '
+			'INSERT INTO seen_users(user_id, username, display_name, first_seen) VALUES (?, ?, ?, ?) '
 			'ON CONFLICT(user_id) DO UPDATE SET '
 			'username=COALESCE(excluded.username, seen_users.username), '
 			'display_name=COALESCE(excluded.display_name, seen_users.display_name)',
-			(user_id, username, display_name)
+			(user_id, username, display_name, self.unix_time())
 		)
 		self.connection.commit()
+
+	def get_first_seen(self, user_id):
+		"""Look up first_seen for a user, backfilling it with the current time if missing."""
+		row = self.cursor.execute('SELECT first_seen FROM seen_users WHERE user_id=?', (user_id,)).fetchone()
+		if row is not None and row[0] is not None:
+			return row[0]
+		now = self.unix_time()
+		if row is None:
+			self.cursor.execute('INSERT INTO seen_users(user_id, first_seen) VALUES (?, ?)', (user_id, now))
+		else:
+			self.cursor.execute('UPDATE seen_users SET first_seen=? WHERE user_id=?', (now, user_id))
+		self.connection.commit()
+		return now
+
+	_USER_ID_LOOKUPS = (
+		('user', 'id'),
+		('seen_users', 'user_id'),
+		('pending_chats', 'user_id'),
+		('roles', 'user_id'),
+		('blocklist', 'user_id'),
+		('ban_exceptions', 'user_id'),
+		('action_log', 'target_id'),
+		('pending_unbans', 'user_id'),
+		('mutes', 'user_id'),
+		('global_mutes', 'user_id'),
+		('cooldown_use', 'user_id'),
+		('command_banned', 'user_id'),
+	)
+
+	def user_has_any_record(self, user_id):
+		"""Whether this user_id shows up in any table at all, not just seen_users."""
+		for table, col in self._USER_ID_LOOKUPS:
+			if self.cursor.execute(f'SELECT 1 FROM {table} WHERE {col}=? LIMIT 1', (user_id,)).fetchone():
+				return True
+		return False
 
 	def find_user_by_username(self, username):
 		username = username.lstrip('@').lower()

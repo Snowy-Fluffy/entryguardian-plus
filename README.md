@@ -12,7 +12,7 @@ The captcha type is chosen randomly from the enabled types: **DOOM** (shoot N en
 4. On completion the page shows an 8-character code.
 5. The user sends the code to the bot → bot verifies it, unmutes the user in all pending chats, and deletes the welcome message.
 
-Sessions expire after 10 minutes. Failed code attempts are limited; too many wrong attempts result in a temporary block. A newcomer who never passes the captcha within **24 hours** is kicked from the chat (and immediately unbanned, so they can rejoin and try again). This 24h kick is on by default and can be turned off per chat from the admin panel. The unban half of a kick is recorded in a persistent queue and retried (honouring rate-limit `Retry-After`) until it succeeds, so a failed/rate-limited unban — or a restart mid-kick — never leaves someone stuck banned. Re-joining within an hour of the last prompt doesn't re-post the welcome message, to avoid spam.
+Sessions expire after 10 minutes. Failed code attempts are limited; too many wrong attempts result in a temporary block. A newcomer who never passes the captcha within **24 hours** is kicked from the chat (and immediately unbanned, so they can rejoin and try again). This 24h kick is on by default and can be turned off per chat from the admin panel; the welcome message tells the newcomer about the 24-hour limit only when the kick is enabled for that chat. The unban half of a kick is recorded in a persistent queue and retried (honouring rate-limit `Retry-After`) until it succeeds, so a failed/rate-limited unban — or a restart mid-kick — never leaves someone stuck banned. Re-joining within an hour of the last prompt doesn't re-post the welcome message, to avoid spam.
 
 ## Captcha types
 
@@ -64,6 +64,11 @@ MAX_ATTEMPTS=3            # wrong code attempts before temp block
 COOL_DOWN=900             # temp block duration in seconds
 LOCALE=ru_RU
 OWNERS=                   # comma-separated Telegram user IDs of bot owners (full access in every chat)
+
+# Username resolve via EXTERNAL API (used when Telegram + the cache can't resolve a @username).
+# 0 = off, 1 = telecrm.xyz only, 2 = Apify only, 3 = both (telecrm.xyz primary, Apify fallback)
+USERNAME_RESOLVE=0
+APIFY_TOKEN=                # Apify API token, required for modes 2 and 3
 ```
 
 ## Moderation
@@ -86,7 +91,7 @@ The bot has a per-chat role system with three levels:
 | `/ungban` | admins, owners | **Global** unban: remove the user from the blocklist and lift their ban in every chat the bot is in |
 | `/unsban` | admins, owners | **Silent local** unban: same as `/unban`, with nothing posted to the chat |
 | `/unsgban` | admins, owners | **Silent global** unban: same as `/ungban`, with nothing posted to the chat |
-| `/mute [duration] [reason]` | moderators, admins, owners | Mute the target in **this** chat. Duration like `30s`, `10m` (minutes), `1h`, `1d`, `1w`, `2mo` (months — note `mo`, since `m` is minutes); omit for permanent; reason optional. e.g. `mute @user 10m spam` or reply with `mute 1d` |
+| `/mute [duration] [reason]` | moderators, admins, owners | Mute the target in **this** chat. Duration like `10m` (minutes), `1h`, `1d`, `1w`, `2mo` (months — note `mo`, since `m` is minutes); **minimum 1 minute** (seconds aren't accepted); omit for permanent; reason optional. e.g. `mute @user 10m spam` or reply with `mute 1d` |
 | `/gmute` | admins, owners | **Global** mute: mute the target in every chat the bot is in, announced in all of them |
 | `/smute` | admins, owners | **Silent local** mute (no announcement) |
 | `/gsmute` | admins, owners | **Silent global** mute (no announcement) |
@@ -106,15 +111,19 @@ The bot has a per-chat role system with three levels:
 | `/rules` | everyone | Show this chat's custom rules (set via the admin panel) |
 | `/staff` | everyone | List the admins and moderators of this chat (owners are not shown) |
 | `/admin` | admins, owners | Open the **admin panel** in a private chat with the bot (see below) |
-| `/help` | everyone | Show the list of available commands |
+| `/help` | everyone | Show the commands available **to that specific user** (regular members see the everyone-commands, moderators also see moderator commands, admins/owners see everything). The message auto-deletes after 1 minute |
 
 The target user can be specified by **replying** to their message, or by passing their numeric **ID** (`/ban 123456789`) or **@username** (`/ban @user spam`). Replying or using a numeric ID is the most reliable. An `@username` is first resolved **live** through Telegram (`getChat`) — which works for channels and public groups but **not for regular users** (the Bot API can't turn a user's @username into an id). For users, the bot falls back to its id↔username/display-name **cache** (filled from observed messages and live lookups; reassignments are tracked, and all values are bound as query parameters so a name can never inject SQL). So `@username` resolves a user only if the bot has seen them; there is a small window where a freshly-reassigned username could still point at the previous owner until the new one is seen — reply or numeric ID avoid this entirely.
+
+If even the cache misses, the bot can optionally resolve the `@username` through an **external API** — this is what `USERNAME_RESOLVE` controls: `0` off, `1` telecrm.xyz only, `2` Apify only, `3` both (telecrm.xyz first, Apify as fallback). The Apify resolver (modes 2 and 3) needs an `APIFY_TOKEN`. When all enabled resolvers fail, the command reports that the user couldn't be determined.
 
 **Banning channels:** when someone posts in the group **as a channel**, a normal ban would only hit the anonymous `@Channel_Bot`. Instead, **reply** to the channel's message with `/ban` (or `/gban`, `/sban`, `/sgban`) and the bot bans the *channel sender* itself (and `/unban` … `/unsgban` reverse it). Global channel bans are remembered and re-applied in every chat the bot guards, just like user bans. Channels can't be muted (Telegram has no such action) — the bot tells you to ban instead — and can't be given a staff role.
 
 Command messages are deleted automatically after they are processed (the bot needs the *delete messages* admin right for this).
 
-Punishment announcements (bans, mutes, unbans, unmutes) are posted in italics and always show the staff member and the target with their numeric id. When a target is given by a bare **ID**, the bot looks the person up across every chat it's in (then its local cache) to show a real display name instead of just the number; the name links to the public profile (`t.me/username`) when the account has one, and falls back to plain `display name (id …)` or a bare `id …` when nothing is known. Mute durations are spelled out (e.g. `5 hours` rather than `5h`).
+The **global** commands (`/gban`, `/sgban`, `/gmute`, `/gsmute`, `/ungban`, `/unsgban`, `/ungmute`, `/ungsmute`) can also be sent in a **private chat with the bot** by owners and by anyone who is an admin of at least one chat (target by ID or @username). When issued from DM the broadcast to all chats omits the source chat — it just says "globally banned/muted/…" — and the issuer gets a confirmation in DM. Logging from DM goes to each chat the issuer administers (owners aren't logged). Silent variants still post and DM nothing to the chats/target.
+
+Punishment announcements (bans, mutes, unbans, unmutes) are posted in italics and always show the staff member and the target with their numeric id. When a target is given by a bare **ID**, the bot looks the person up across every chat it's in (then its local cache) to show a real display name instead of just the number; the name links to the public profile (`t.me/username`) when the account has one, and falls back to plain `display name (id …)` or a bare `id …` when nothing is known. Mute durations are spelled out (e.g. `5 hours` rather than `5h`). For non-silent punishments the bot also DMs the affected user a rephrased copy of the notice (if they have ever started a chat with the bot); silent variants (`/sban`, `/sgban`, `/smute`, `/gsmute`, `/unsban`, `/unsgban`, `/unsmute`, `/ungsmute`) post and DM nothing.
 
 ### Admin panel (`/admin`)
 

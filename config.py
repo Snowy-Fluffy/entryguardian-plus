@@ -36,3 +36,5 @@ KILL_COOLDOWN: float = float(os.getenv('KILL_COOLDOWN', '0.5'))
 CAPTCHA_MIN_PIECES: int = int(os.getenv('CAPTCHA_MIN_PIECES', '3'))
 MARIO_MIN_PLAY_TIME: float = float(os.getenv('MARIO_MIN_PLAY_TIME', '5.0'))
 CAPTCHA_TYPES: list[str] = [t.strip() for t in os.getenv('CAPTCHA_TYPES', 'doom,tetris,mario').split(',') if t.strip()]
+USERNAME_RESOLVE: int = int(os.getenv('USERNAME_RESOLVE', '0'))
+APIFY_TOKEN: str = os.getenv('APIFY_TOKEN', '')

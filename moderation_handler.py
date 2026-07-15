@@ -19,6 +19,7 @@ from datetime import datetime
 import asyncio
 import html
 import re
+import aiohttp
 from aiogram import Router, types, Bot, BaseMiddleware, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
 from aiogram.filters import Command, CommandObject
@@ -64,7 +65,7 @@ class UserTrackingMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user = event.from_user
-        if user and user.username:
+        if user:
             entry = (user.username, user.full_name)
             if _seen_cache.get(user.id) != entry:
                 db_man.remember_user(user.id, user.username, user.full_name)
@@ -184,6 +185,76 @@ def _cache_from_chat(chat) -> None:
         pass
 
 
+_USERNAME_API_URL = 'https://telecrm.xyz/api/tgkit/resolve-username'
+_APIFY_ACTOR_URL = 'https://api.apify.com/v2/acts/TrueFetch~telegram-profile/run-sync-get-dataset-items'
+
+
+def _cache_external(uid, username, first, last) -> None:
+    try:
+        name = ' '.join(p for p in (first, last) if p) or None
+        db_man.remember_user(int(uid), username, name)
+    except Exception:
+        pass
+
+
+async def _external_primary(uname: str) -> int | None:
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
+            async with session.get(_USERNAME_API_URL, params={'username': uname}) as resp:
+                if resp.status // 100 != 2:
+                    return None
+                data = await resp.json()
+        uid = data.get('id')
+        if not uid:
+            return None
+        _cache_external(uid, data.get('username'), data.get('first_name'), data.get('last_name'))
+        return int(uid)
+    except Exception:
+        return None
+
+
+async def _external_fallback(uname: str) -> int | None:
+    token = getattr(config, 'APIFY_TOKEN', '')
+    if not token:
+        return None
+    try:
+        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as session:
+            async with session.post(_APIFY_ACTOR_URL, params={'token': token},
+                                    json={'telegram_url': [f'@{uname}']}) as resp:
+                if resp.status // 100 != 2:
+                    return None
+                data = await resp.json()
+        if not isinstance(data, list) or not data:
+            return None
+        item = data[0]
+        uid = item.get('id')
+        if not uid:
+            return None
+        usernames = item.get('usernames') or []
+        _cache_external(uid, usernames[0] if usernames else None, item.get('first_name'), item.get('last_name'))
+        return int(uid)
+    except Exception:
+        return None
+
+
+async def _resolve_username_external(username: str) -> int | None:
+    mode = config.USERNAME_RESOLVE
+    if mode not in (1, 2, 3):
+        return None
+    uname = username.lstrip('@')
+    if not uname:
+        return None
+    if mode in (1, 3):
+        result = await _external_primary(uname)
+        if result is not None:
+            return result
+    if mode in (2, 3):
+        result = await _external_fallback(uname)
+        if result is not None:
+            return result
+    return None
+
+
 async def _resolve_target(message: types.Message, command: CommandObject, bot: Bot) -> int | None:
     """Resolve the target user id from a text_mention, a reply, a numeric id, or an @username."""
     for entity in message.entities or []:
@@ -207,7 +278,10 @@ async def _resolve_target(message: types.Message, command: CommandObject, bot: B
             return chat.id
         except Exception:
             pass
-        return db_man.find_user_by_username(arg)
+        cached = db_man.find_user_by_username(arg)
+        if cached is not None:
+            return cached
+        return await _resolve_username_external(arg)
 
     return None
 
@@ -221,6 +295,19 @@ async def _require(message: types.Message, allowed: bool) -> bool:
         await _deny(message)
         return False
     return True
+
+
+async def _require_global(message: types.Message) -> bool:
+    user_id = message.from_user.id
+    if message.chat.type in _GROUP_TYPES:
+        if permissions.can_manage_roles(db_man, message.chat.id, user_id):
+            return True
+        await _deny(message)
+        return False
+    if permissions.is_owner(user_id) or db_man.get_admin_chats(user_id):
+        return True
+    await message.answer(translator.get_string('mod_no_permission'))
+    return False
 
 
 async def _check_preconditions(message: types.Message) -> bool:
@@ -516,7 +603,21 @@ async def staff(message: types.Message, bot: Bot) -> None:
 @router.message(Command('help'))
 async def help_command(message: types.Message) -> None:
     await _delete_silently(message)
-    await message.answer(translator.get_string('help_text'))
+    user_id = message.from_user.id
+    if message.chat.type in _GROUP_TYPES:
+        is_admin = permissions.can_manage_roles(db_man, message.chat.id, user_id)
+        is_mod = permissions.is_staff(db_man, message.chat.id, user_id)
+    else:
+        is_admin = permissions.is_owner(user_id) or bool(db_man.get_admin_chats(user_id))
+        is_mod = is_admin or bool(db_man.get_moderator_chats(user_id))
+    parts = [translator.get_string('help_header')]
+    if is_admin:
+        parts.append(translator.get_string('help_admin'))
+    if is_mod:
+        parts.append(translator.get_string('help_mod'))
+    parts.append(translator.get_string('help_everyone'))
+    sent = await message.answer('\n\n'.join(parts))
+    _spawn(_delete_after(message.bot, message.chat.id, sent.message_id, 60))
 
 
 def _full_user_info(user: types.User) -> str:
@@ -562,6 +663,7 @@ async def report_cmd(message: types.Message, command: CommandObject, bot: Bot) -
 
     lines = [
         translator.get_string('report_header'),
+        translator.get_string('report_time').format(datetime.now().strftime('%d.%m.%Y %H:%M:%S')),
         translator.get_string('report_chat').format(chat_title),
         translator.get_string('report_from').format(_full_user_info(reporter)),
     ]
@@ -601,13 +703,19 @@ _PUNISH_LOG_KEYS = {
 _PUNL_MAX = 40
 
 
-async def _render_punishments(bot: Bot, rows: list, target_label: str,
+def _first_seen_line(target_id: int) -> str:
+    """The 'First seen:' line shown at the top of /punl output."""
+    when = datetime.fromtimestamp(db_man.get_first_seen(target_id)).strftime('%d.%m.%Y %H:%M:%S')
+    return translator.get_string('punl_first_seen').format(when)
+
+
+async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label: str,
                               chat_ids: set[int], show_chat: bool) -> str:
     """Render a user's punishment history from get_punishments() rows, scoped to chat_ids."""
     rows = [r for r in rows if r[2] in _PUNISH_LOG_KEYS and r[0] in chat_ids]
     if not rows:
-        return translator.get_string('punl_empty').format(target_label)
-    lines = [translator.get_string('punl_header').format(target_label, len(rows))]
+        return _first_seen_line(target_id) + '\n' + translator.get_string('punl_empty').format(target_label)
+    lines = [_first_seen_line(target_id), translator.get_string('punl_header').format(target_label, len(rows))]
     titles: dict[int, str] = {}
     for chat_id, ts, _action_key, text in rows[:_PUNL_MAX]:
         when = datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M:%S')
@@ -650,10 +758,15 @@ async def punishments_cmd(message: types.Message, command: CommandObject, bot: B
                else message.answer(translator.get_string(key)))
         return
 
+    if not db_man.user_has_any_record(target_id):
+        await (_ianswer(message, translator.get_string('punl_unknown_user')) if is_group
+               else message.answer(translator.get_string('punl_unknown_user')))
+        return
+
     target_label = await (_display_name(bot, message.chat.id, target_id) if is_group
                           else _global_name(bot, target_id))
     rows = db_man.get_punishments(target_id)
-    await message.answer(await _render_punishments(bot, rows, target_label, chat_ids, show_chat))
+    await message.answer(await _render_punishments(bot, rows, target_id, target_label, chat_ids, show_chat))
 
 
 def _user_label(user: types.User) -> str:
@@ -713,6 +826,17 @@ def _log_action(message: types.Message, action_key: str, target_label: str,
     _record_log(message.chat.id, message.from_user, action_key, target_label, reason, target_id)
 
 
+def _log_global(message: types.Message, action_key: str, target_label: str,
+                reason: str = '', target_id: int | None = None) -> None:
+    if message.chat.type in _GROUP_TYPES:
+        _record_log(message.chat.id, message.from_user, action_key, target_label, reason, target_id)
+        return
+    if permissions.is_owner(message.from_user.id):
+        return
+    for chat_id in db_man.get_admin_chats(message.from_user.id):
+        _record_log(chat_id, message.from_user, action_key, target_label, reason, target_id)
+
+
 async def _parse_ban(message: types.Message, command: CommandObject, bot: Bot) -> tuple[int | None, str]:
     """Resolve the ban target and the optional reason from a reply or `<target> [reason]`."""
     args = (command.args or '').strip()
@@ -743,7 +867,10 @@ async def _parse_ban(message: types.Message, command: CommandObject, bot: Bot) -
             return chat.id, reason
         except Exception:
             pass
-        return db_man.find_user_by_username(token), reason
+        cached = db_man.find_user_by_username(token)
+        if cached is not None:
+            return cached, reason
+        return await _resolve_username_external(token), reason
 
     return None, reason
 
@@ -787,8 +914,35 @@ def _remote_ban_text(banned: str, source_title: str, reason: str) -> str:
     return translator.get_string('ban_announce_remote_no_reason').format(banned, _esc(source_title))
 
 
+def _global_ban_text(banned: str, reason: str) -> str:
+    if reason:
+        return translator.get_string('ban_global').format(banned, _esc(reason))
+    return translator.get_string('ban_global_no_reason').format(banned)
+
+
+def _global_unban_text(name: str) -> str:
+    return translator.get_string('unban_global').format(name)
+
+
 async def _announce_ban(message: types.Message, banned: str, reason: str) -> None:
     await _ianswer_html(message, _local_ban_text(message, banned, reason))
+
+
+def _dm_text(key: str, chat_title: str, message: types.Message, reason: str = '', dur_words: str = '') -> str:
+    role_word = _actor_role_word(message.chat.id, message.from_user.id)
+    text = translator.get_string(key).format(chat_title, role_word, _user_label(message.from_user))
+    if dur_words:
+        text += translator.get_string('mute_for').format(dur_words)
+    if reason:
+        text += ', ' + translator.get_string('log_reason').format(reason)
+    return text
+
+
+async def _dm_target(bot: Bot, target_id: int, text: str) -> None:
+    try:
+        await bot.send_message(target_id, text)
+    except Exception:
+        pass
 
 
 async def _maybe_channel_ban(message: types.Message, command: CommandObject, bot: Bot,
@@ -875,9 +1029,10 @@ async def _maybe_channel_unban(message: types.Message, bot: Bot,
 async def gban(message: types.Message, command: CommandObject, bot: Bot) -> None:
     """Global ban across every chat the bot is in, announced in all of them. Admins and up."""
     await _delete_silently(message)
-    if not await _require(message, permissions.can_manage_roles(db_man, message.chat.id, message.from_user.id)):
+    if not await _require_global(message):
         return
-    if await _maybe_channel_ban(message, command, bot, glob=True, silent=False, log_key='log_ban'):
+    is_dm = message.chat.type not in _GROUP_TYPES
+    if not is_dm and await _maybe_channel_ban(message, command, bot, glob=True, silent=False, log_key='log_ban'):
         return
     target_id, reason = await _ban_target_or_reply(message, command, bot)
     if target_id is None:
@@ -890,20 +1045,27 @@ async def gban(message: types.Message, command: CommandObject, bot: Bot) -> None
     source_title = message.chat.title or str(message.chat.id)
     local_text = _local_ban_text(message, banned_html, reason)
     remote_text = _remote_ban_text(banned_html, source_title, reason)
+    global_text = _global_ban_text(banned_html, reason)
 
     db_man.add_to_blocklist(target_id)
     chat_ids = set(db_man.get_bot_chats())
-    chat_ids.add(message.chat.id)
+    if not is_dm:
+        chat_ids.add(message.chat.id)
     for chat_id in chat_ids:
         try:
             await bot.ban_chat_member(chat_id, target_id)
         except Exception:
             pass
         try:
-            await _isend_html(bot, chat_id, local_text if chat_id == message.chat.id else remote_text)
+            await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
         except Exception:
             pass
-    _log_action(message, 'log_ban', banned, reason, target_id)
+    _log_global(message, 'log_ban', banned, reason, target_id)
+    if is_dm:
+        await _isend_html(bot, message.chat.id, global_text)
+        await _dm_target(bot, target_id, _dm_text('dm_banned_global_nosrc', '', message, reason))
+    else:
+        await _dm_target(bot, target_id, _dm_text('dm_banned_global', source_title, message, reason))
 
 
 @router.message(Command('ban'))
@@ -934,6 +1096,7 @@ async def ban(message: types.Message, command: CommandObject, bot: Bot) -> None:
         return
     _log_action(message, 'log_lban', banned, reason, target_id)
     await _announce_ban(message, banned_html, reason)
+    await _dm_target(bot, target_id, _dm_text('dm_banned', message.chat.title or str(message.chat.id), message, reason))
     _cooldown_mark(message, 'ban')
 
 
@@ -941,9 +1104,10 @@ async def ban(message: types.Message, command: CommandObject, bot: Bot) -> None:
 async def sgban(message: types.Message, command: CommandObject, bot: Bot) -> None:
     """Silent global ban: same reach as /gban but nothing is posted to the chat. Admins and up."""
     await _delete_silently(message)
-    if not await _require(message, permissions.can_manage_roles(db_man, message.chat.id, message.from_user.id)):
+    if not await _require_global(message):
         return
-    if await _maybe_channel_ban(message, command, bot, glob=True, silent=True, log_key='log_sban'):
+    is_dm = message.chat.type not in _GROUP_TYPES
+    if not is_dm and await _maybe_channel_ban(message, command, bot, glob=True, silent=True, log_key='log_sban'):
         return
     target_id, reason = await _ban_target_or_reply(message, command, bot)
     if target_id is None:
@@ -952,9 +1116,11 @@ async def sgban(message: types.Message, command: CommandObject, bot: Bot) -> Non
         await _ianswer(message, translator.get_string('mod_cannot_target_owner'))
         return
 
-    _, banned = await _punish_labels(bot, message, command, target_id)
+    banned_html, banned = await _punish_labels(bot, message, command, target_id)
     await _global_ban(bot, target_id)
-    _log_action(message, 'log_sban', banned, reason, target_id)
+    _log_global(message, 'log_sban', banned, reason, target_id)
+    if is_dm:
+        await _isend_html(bot, message.chat.id, _global_ban_text(banned_html, reason))
 
 
 @router.message(Command('sban'))
@@ -1039,6 +1205,7 @@ async def unban(message: types.Message, command: CommandObject, bot: Bot) -> Non
     actor = _actor_mention(message.from_user)
     await _ianswer_html(message, translator.get_string('unban_announce').format(
         name_html, role_word, actor))
+    await _dm_target(bot, target_id, _dm_text('dm_unbanned', message.chat.title or str(message.chat.id), message))
     _cooldown_mark(message, 'unban')
 
 
@@ -1046,9 +1213,10 @@ async def unban(message: types.Message, command: CommandObject, bot: Bot) -> Non
 async def ungban(message: types.Message, command: CommandObject, bot: Bot) -> None:
     """Global unban: remove the user from the blocklist and lift the ban in every known chat."""
     await _delete_silently(message)
-    if not await _require(message, permissions.can_manage_roles(db_man, message.chat.id, message.from_user.id)):
+    if not await _require_global(message):
         return
-    if await _maybe_channel_unban(message, bot, glob=True, silent=False, log_key='log_ungban'):
+    is_dm = message.chat.type not in _GROUP_TYPES
+    if not is_dm and await _maybe_channel_unban(message, bot, glob=True, silent=False, log_key='log_ungban'):
         return
     target_id = await _get_target_or_reply(message, command, bot)
     if target_id is None:
@@ -1057,25 +1225,32 @@ async def ungban(message: types.Message, command: CommandObject, bot: Bot) -> No
     name_html, name = await _punish_labels(bot, message, command, target_id)
     db_man.remove_from_blocklist(target_id)
     db_man.clear_ban_exceptions(target_id)
-    _log_action(message, 'log_ungban', name)
+    _log_global(message, 'log_ungban', name, '', target_id)
 
     source_title = message.chat.title or str(message.chat.id)
     role_word = _actor_role_word(message.chat.id, message.from_user.id)
     actor = _actor_mention(message.from_user)
     local_text = translator.get_string('ungban_announce').format(name_html, role_word, actor)
     remote_text = translator.get_string('ungban_announce_remote').format(name_html, _esc(source_title))
+    global_text = _global_unban_text(name_html)
 
     chat_ids = set(db_man.get_bot_chats())
-    chat_ids.add(message.chat.id)
+    if not is_dm:
+        chat_ids.add(message.chat.id)
     for chat_id in chat_ids:
         try:
             await bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
         except Exception:
             pass
         try:
-            await _isend_html(bot, chat_id, local_text if chat_id == message.chat.id else remote_text)
+            await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
         except Exception:
             pass
+    if is_dm:
+        await _isend_html(bot, message.chat.id, global_text)
+        await _dm_target(bot, target_id, _dm_text('dm_unbanned_global_nosrc', '', message))
+    else:
+        await _dm_target(bot, target_id, _dm_text('dm_unbanned_global', source_title, message))
 
 
 @router.message(Command('unsban'))
@@ -1103,25 +1278,29 @@ async def unsban(message: types.Message, command: CommandObject, bot: Bot) -> No
 async def unsgban(message: types.Message, command: CommandObject, bot: Bot) -> None:
     """Silent global unban: same as /ungban but nothing is posted to the chat."""
     await _delete_silently(message)
-    if not await _require(message, permissions.can_manage_roles(db_man, message.chat.id, message.from_user.id)):
+    if not await _require_global(message):
         return
-    if await _maybe_channel_unban(message, bot, glob=True, silent=True, log_key='log_unsgban'):
+    is_dm = message.chat.type not in _GROUP_TYPES
+    if not is_dm and await _maybe_channel_unban(message, bot, glob=True, silent=True, log_key='log_unsgban'):
         return
     target_id = await _get_target_or_reply(message, command, bot)
     if target_id is None:
         return
 
-    _, name = await _punish_labels(bot, message, command, target_id)
+    name_html, name = await _punish_labels(bot, message, command, target_id)
     db_man.remove_from_blocklist(target_id)
     db_man.clear_ban_exceptions(target_id)
     chat_ids = set(db_man.get_bot_chats())
-    chat_ids.add(message.chat.id)
+    if not is_dm:
+        chat_ids.add(message.chat.id)
     for chat_id in chat_ids:
         try:
             await bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
         except Exception:
             pass
-    _log_action(message, 'log_unsgban', name)
+    _log_global(message, 'log_unsgban', name, '', target_id)
+    if is_dm:
+        await _isend_html(bot, message.chat.id, _global_unban_text(name_html))
 
 
 @router.message(Command('delete'))
@@ -1382,6 +1561,14 @@ def _mute_remote_text(muted: str, source_title: str, dur_words: str, reason: str
     return _with_extras(translator.get_string('mute_announce_remote').format(muted, _esc(source_title)), dur_words, reason)
 
 
+def _global_mute_text(muted: str, dur_words: str, reason: str) -> str:
+    return _with_extras(translator.get_string('mute_global').format(muted), dur_words, reason)
+
+
+def _global_unmute_text(target: str, reason: str) -> str:
+    return _with_extras(translator.get_string('unmute_global').format(target), '', reason)
+
+
 def _unmute_text(message: types.Message, target: str, reason: str) -> str:
     """Local unmute announcement. `target` is HTML (a mention)."""
     base = translator.get_string('unmute_announce').format(
@@ -1402,6 +1589,9 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
         provided = bool(message.reply_to_message) or bool((command.args or '').strip())
         await _ianswer(message, translator.get_string('mod_user_not_found' if provided else 'mod_specify_user'))
         return False
+    if dur_text.endswith('s'):
+        await _ianswer(message, translator.get_string('mute_failed'))
+        return False
     if await _is_bot_target(message, bot, target_id):
         return False
     if permissions.is_owner(target_id):
@@ -1413,13 +1603,16 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
     muted_html, muted = await _punish_labels(bot, message, command, target_id)
     label = f'{muted} [{dur_text}]' if dur_text else muted
     dur_words = _human_duration_words(dur_text) if dur_text else ''
+    is_dm = message.chat.type not in _GROUP_TYPES
 
     if glob:
         db_man.set_global_mute(target_id, int(datetime.now().timestamp()) + dur_seconds if dur_seconds else 0)
         local_text = _mute_text(message, muted_html, dur_words, reason)
         remote_text = _mute_remote_text(muted_html, message.chat.title or str(message.chat.id), dur_words, reason)
+        global_text = _global_mute_text(muted_html, dur_words, reason)
         chat_ids = set(db_man.get_bot_chats())
-        chat_ids.add(message.chat.id)
+        if not is_dm:
+            chat_ids.add(message.chat.id)
         for chat_id in chat_ids:
             try:
                 await _apply_mute(bot, chat_id, target_id, dur_seconds)
@@ -1427,9 +1620,11 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
                 pass
             if not silent:
                 try:
-                    await _isend_html(bot, chat_id, local_text if chat_id == message.chat.id else remote_text)
+                    await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
                 except Exception:
                     pass
+        if not silent and is_dm:
+            await _isend_html(bot, message.chat.id, global_text)
     else:
         try:
             await _apply_mute(bot, message.chat.id, target_id, dur_seconds)
@@ -1439,7 +1634,15 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
         if not silent:
             await _ianswer_html(message, _mute_text(message, muted_html, dur_words, reason))
 
-    _record_log(message.chat.id, message.from_user, log_key, label, reason, target_id)
+    if not silent:
+        if glob and is_dm:
+            dm_key = 'dm_muted_global_nosrc'
+        elif glob:
+            dm_key = 'dm_muted_global'
+        else:
+            dm_key = 'dm_muted'
+        await _dm_target(bot, target_id, _dm_text(dm_key, message.chat.title or str(message.chat.id), message, reason, dur_words))
+    _log_global(message, log_key, label, reason, target_id)
     return True
 
 
@@ -1456,13 +1659,16 @@ async def _run_unmute(message: types.Message, command: CommandObject, bot: Bot, 
         return False
 
     target_html, target = await _punish_labels(bot, message, command, target_id)
+    is_dm = message.chat.type not in _GROUP_TYPES
 
     if glob:
         db_man.remove_global_mute(target_id)
         local_text = _unmute_text(message, target_html, reason)
         remote_text = _unmute_remote_text(target_html, message.chat.title or str(message.chat.id), reason)
+        global_text = _global_unmute_text(target_html, reason)
         chat_ids = set(db_man.get_bot_chats())
-        chat_ids.add(message.chat.id)
+        if not is_dm:
+            chat_ids.add(message.chat.id)
         for chat_id in chat_ids:
             try:
                 await _apply_unmute(bot, chat_id, target_id)
@@ -1470,9 +1676,11 @@ async def _run_unmute(message: types.Message, command: CommandObject, bot: Bot, 
                 pass
             if not silent:
                 try:
-                    await _isend_html(bot, chat_id, local_text if chat_id == message.chat.id else remote_text)
+                    await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
                 except Exception:
                     pass
+        if not silent and is_dm:
+            await _isend_html(bot, message.chat.id, global_text)
     else:
         try:
             await _apply_unmute(bot, message.chat.id, target_id)
@@ -1481,7 +1689,15 @@ async def _run_unmute(message: types.Message, command: CommandObject, bot: Bot, 
         if not silent:
             await _ianswer_html(message, _unmute_text(message, target_html, reason))
 
-    _record_log(message.chat.id, message.from_user, log_key, target, reason, target_id)
+    if not silent:
+        if glob and is_dm:
+            dm_key = 'dm_unmuted_global_nosrc'
+        elif glob:
+            dm_key = 'dm_unmuted_global'
+        else:
+            dm_key = 'dm_unmuted'
+        await _dm_target(bot, target_id, _dm_text(dm_key, message.chat.title or str(message.chat.id), message, reason))
+    _log_global(message, log_key, target, reason, target_id)
     return True
 
 
@@ -1499,7 +1715,7 @@ async def mute_cmd(message: types.Message, command: CommandObject, bot: Bot) -> 
 @router.message(Command('gmute'))
 async def gmute_cmd(message: types.Message, command: CommandObject, bot: Bot) -> None:
     await _delete_silently(message)
-    if await _require(message, permissions.can_manage_roles(db_man, message.chat.id, message.from_user.id)):
+    if await _require_global(message):
         await _run_mute(message, command, bot, glob=True, silent=False, log_key='log_gmute')
 
 
@@ -1513,7 +1729,7 @@ async def smute_cmd(message: types.Message, command: CommandObject, bot: Bot) ->
 @router.message(Command('gsmute'))
 async def gsmute_cmd(message: types.Message, command: CommandObject, bot: Bot) -> None:
     await _delete_silently(message)
-    if await _require(message, permissions.can_manage_roles(db_man, message.chat.id, message.from_user.id)):
+    if await _require_global(message):
         await _run_mute(message, command, bot, glob=True, silent=True, log_key='log_gsmute')
 
 
@@ -1538,14 +1754,14 @@ async def unsmute_cmd(message: types.Message, command: CommandObject, bot: Bot) 
 @router.message(Command('ungmute'))
 async def ungmute_cmd(message: types.Message, command: CommandObject, bot: Bot) -> None:
     await _delete_silently(message)
-    if await _require(message, permissions.can_manage_roles(db_man, message.chat.id, message.from_user.id)):
+    if await _require_global(message):
         await _run_unmute(message, command, bot, glob=True, silent=False, log_key='log_ungmute')
 
 
 @router.message(Command('ungsmute'))
 async def ungsmute_cmd(message: types.Message, command: CommandObject, bot: Bot) -> None:
     await _delete_silently(message)
-    if await _require(message, permissions.can_manage_roles(db_man, message.chat.id, message.from_user.id)):
+    if await _require_global(message):
         await _run_unmute(message, command, bot, glob=True, silent=True, log_key='log_ungsmute')
 
 
@@ -2015,7 +2231,10 @@ async def _resolve_panel_target(message: types.Message, bot: Bot) -> int | None:
         return chat.id
     except Exception:
         pass
-    return db_man.find_user_by_username(name)
+    cached = db_man.find_user_by_username(name)
+    if cached is not None:
+        return cached
+    return await _resolve_username_external(name)
 
 
 async def _apply_panel_role(bot: Bot, actor: types.User, chat_id: int, action: str, target_id: int) -> str:

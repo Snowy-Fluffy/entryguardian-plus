@@ -97,7 +97,8 @@ async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
 
     if not db_man.welcome_within(chat_id, user_id, _WELCOME_COOLDOWN):
         user_display = f'@{user.username}' if user.username else user.first_name
-        msg = translator.get_string('welcome_msg').format(user_display)
+        welcome_key = 'welcome_msg' if db_man.is_kick_enabled(chat_id) else 'welcome_msg_nokick'
+        msg = translator.get_string(welcome_key).format(user_display)
 
         keyboard = None
         if bot_username:
@@ -168,6 +169,8 @@ async def _delete_user_welcome_in_chat(bot: Bot, user_id: int, chat_id: int) -> 
 
 
 _KICK_THROTTLE = 1.0
+_UNBAN_AFTER = 15
+_UNBAN_RETRY_INTERVAL = 20
 
 
 async def _flood_safe(call):
@@ -195,20 +198,20 @@ async def _try_unban(bot: Bot, chat_id: int, user_id: int) -> bool:
 
 
 async def _kick_expired(bot: Bot, chat_id: int, user_id: int) -> None:
-    """Kick one timed-out user: ban (waiting out any flood limit), then lift the ban."""
+    """Kick one timed-out user: record the unban obligation, then ban. The unban itself is done
+    later by pending_unban_retry_task, once the ban has settled (avoids the ban/unban race)."""
+    db_man.add_pending_unban(chat_id, user_id, db_man.unix_time() + _UNBAN_AFTER)
     try:
         await _flood_safe(lambda: bot.ban_chat_member(chat_id, user_id))
     except Exception:
         return
-    db_man.add_pending_unban(chat_id, user_id, db_man.unix_time())
     db_man.remove_pending_chat(user_id, chat_id)
     await _delete_user_welcome_in_chat(bot, user_id, chat_id)
-    await _try_unban(bot, chat_id, user_id)
 
 
 async def captcha_timeout_task(bot: Bot) -> None:
     """Kick users who never passed the captcha within _CAPTCHA_KICK_AFTER seconds.
-    They are immediately unbanned, so they can rejoin and try again. Throttled so a large
+    They are unbanned shortly after by the retry task, so they can rejoin. Throttled so a large
     backlog drains steadily instead of tripping the rate limit and stalling."""
     while True:
         await asyncio.sleep(600)
@@ -220,9 +223,14 @@ async def captcha_timeout_task(bot: Bot) -> None:
 
 
 async def pending_unban_retry_task(bot: Bot) -> None:
-    """Finish any unbans that failed earlier, so a kick never leaves someone unable to rejoin."""
+    """Perform every kick's unban once its ban has settled, retrying until it succeeds, so a kick
+    never leaves someone stuck banned."""
     while True:
-        await asyncio.sleep(60)
-        for chat_id, user_id in db_man.get_due_unbans(db_man.unix_time()):
+        await asyncio.sleep(_UNBAN_RETRY_INTERVAL)
+        try:
+            due = db_man.get_due_unbans(db_man.unix_time())
+        except Exception:
+            continue
+        for chat_id, user_id in due:
             await _try_unban(bot, chat_id, user_id)
             await asyncio.sleep(_KICK_THROTTLE)
