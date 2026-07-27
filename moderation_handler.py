@@ -334,9 +334,13 @@ def _italic(text: str) -> str:
     return f'<i>{html.escape(text, quote=False)}</i>'
 
 
-async def _ianswer(message: types.Message, text: str) -> types.Message:
+async def _ianswer(message: types.Message, text: str, disable_preview: bool = False) -> types.Message:
     """Reply in the chat using the bot's standard italic styling."""
-    return await message.answer(_italic(text), parse_mode='HTML')
+    return await message.answer(
+        _italic(text),
+        parse_mode='HTML',
+        link_preview_options=types.LinkPreviewOptions(is_disabled=True) if disable_preview else None,
+    )
 
 
 async def _isend(bot: Bot, chat_id: int, text: str) -> types.Message:
@@ -490,13 +494,13 @@ async def add_admin(message: types.Message, command: CommandObject, bot: Bot) ->
         return
     if await _is_bot_target(message, bot, target_id):
         return
-    name = await _display_name(bot, message.chat.id, target_id)
+    name_html, name = await _display_name_both(bot, message.chat.id, target_id)
     if db_man.is_admin(message.chat.id, target_id):
-        await _ianswer(message, translator.get_string('already_admin').format(name))
+        await _ianswer_html(message, translator.get_string('already_admin').format(name_html))
         return
     db_man.set_role(message.chat.id, target_id, 'admin')
     _log_action(message, 'log_add_adm', name)
-    await _ianswer(message, translator.get_string('admin_added').format(name))
+    await _ianswer_html(message, translator.get_string('admin_added').format(name_html))
 
 
 @router.message(Command('del_adm'))
@@ -514,13 +518,13 @@ async def del_admin(message: types.Message, command: CommandObject, bot: Bot) ->
             return
     except Exception:
         pass
-    name = await _display_name(bot, message.chat.id, target_id)
+    name_html, name = await _display_name_both(bot, message.chat.id, target_id)
     if not db_man.is_admin(message.chat.id, target_id):
-        await _ianswer(message, translator.get_string('not_admin').format(name))
+        await _ianswer_html(message, translator.get_string('not_admin').format(name_html))
         return
     db_man.remove_role(message.chat.id, target_id)
     _log_action(message, 'log_del_adm', name)
-    await _ianswer(message, translator.get_string('admin_removed').format(name))
+    await _ianswer_html(message, translator.get_string('admin_removed').format(name_html))
 
 
 @router.message(Command('add_mod'))
@@ -533,13 +537,13 @@ async def add_moderator(message: types.Message, command: CommandObject, bot: Bot
         return
     if await _is_bot_target(message, bot, target_id):
         return
-    name = await _display_name(bot, message.chat.id, target_id)
+    name_html, name = await _display_name_both(bot, message.chat.id, target_id)
     if db_man.is_moderator(message.chat.id, target_id):
-        await _ianswer(message, translator.get_string('already_mod').format(name))
+        await _ianswer_html(message, translator.get_string('already_mod').format(name_html))
         return
     db_man.set_role(message.chat.id, target_id, 'moderator')
     _log_action(message, 'log_add_mod', name)
-    await _ianswer(message, translator.get_string('mod_added').format(name))
+    await _ianswer_html(message, translator.get_string('mod_added').format(name_html))
 
 
 @router.message(Command('del_mod'))
@@ -550,23 +554,47 @@ async def del_moderator(message: types.Message, command: CommandObject, bot: Bot
     target_id = await _get_target_or_reply(message, command, bot)
     if target_id is None:
         return
-    name = await _display_name(bot, message.chat.id, target_id)
+    name_html, name = await _display_name_both(bot, message.chat.id, target_id)
     if not db_man.is_moderator(message.chat.id, target_id):
-        await _ianswer(message, translator.get_string('not_mod').format(name))
+        await _ianswer_html(message, translator.get_string('not_mod').format(name_html))
         return
     db_man.remove_role(message.chat.id, target_id)
     _log_action(message, 'log_del_mod', name)
-    await _ianswer(message, translator.get_string('mod_removed').format(name))
+    await _ianswer_html(message, translator.get_string('mod_removed').format(name_html))
+
+
+def _user_identity_labels(user: types.User) -> tuple[str, str]:
+    """(html, plain) 'Full Name (@username, id N)' pair for a fetched chat member.
+    The html version links @username to t.me/username instead of leaving it as a bare
+    @mention, so announcing someone in a group notification doesn't ping them."""
+    plain_details = [f'@{user.username}'] if user.username else []
+    plain_details.append(f'id {user.id}')
+    plain = f'{user.full_name} ({", ".join(plain_details)})'
+
+    html_details = []
+    if user.username:
+        uname = _esc(user.username)
+        html_details.append(f'<a href="https://t.me/{uname}">@{uname}</a>')
+    html_details.append(f'id {user.id}')
+    html_label = f'{_esc(user.full_name)} ({", ".join(html_details)})'
+    return html_label, plain
+
+
+async def _display_name_both(bot: Bot, chat_id: int, user_id: int) -> tuple[str, str]:
+    """(html, plain) display labels for a chat member, one API call for both."""
+    try:
+        user = (await bot.get_chat_member(chat_id, user_id)).user
+    except Exception:
+        return f'id {user_id}', f'id {user_id}'
+    return _user_identity_labels(user)
 
 
 async def _display_name(bot: Bot, chat_id: int, user_id: int) -> str:
-    try:
-        user = (await bot.get_chat_member(chat_id, user_id)).user
-        details = [f'@{user.username}'] if user.username else []
-        details.append(f'id {user.id}')
-        return f'{user.full_name} ({", ".join(details)})'
-    except Exception:
-        return f'id {user_id}'
+    return (await _display_name_both(bot, chat_id, user_id))[1]
+
+
+async def _display_name_html(bot: Bot, chat_id: int, user_id: int) -> str:
+    return (await _display_name_both(bot, chat_id, user_id))[0]
 
 
 @router.message(Command('staff'))
@@ -584,8 +612,8 @@ async def staff(message: types.Message, bot: Bot) -> None:
         await message.answer(translator.get_string('staff_empty'))
         return
 
-    admin_names = [await _display_name(bot, message.chat.id, uid) for uid in admins]
-    mod_names = [await _display_name(bot, message.chat.id, uid) for uid in mods]
+    admin_names = [await _display_name_html(bot, message.chat.id, uid) for uid in admins]
+    mod_names = [await _display_name_html(bot, message.chat.id, uid) for uid in mods]
 
     none = translator.get_string('staff_none')
     lines = [
@@ -597,7 +625,11 @@ async def staff(message: types.Message, bot: Bot) -> None:
         translator.get_string('staff_mods'),
         '\n'.join(f'• {n}' for n in mod_names) if mod_names else none,
     ]
-    await message.answer('\n'.join(lines))
+    await message.answer(
+        '\n'.join(lines),
+        parse_mode='HTML',
+        link_preview_options=types.LinkPreviewOptions(is_disabled=True),
+    )
 
 
 @router.message(Command('help'))
@@ -719,9 +751,10 @@ async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label
     titles: dict[int, str] = {}
     for chat_id, ts, _action_key, text in rows[:_PUNL_MAX]:
         when = datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M:%S')
+        text = _esc(text)
         if show_chat:
             if chat_id not in titles:
-                titles[chat_id] = await _chat_title(bot, chat_id)
+                titles[chat_id] = _esc(await _chat_title(bot, chat_id))
             lines.append(f'{when} | [{titles[chat_id]}] {text}')
         else:
             lines.append(f'{when} | {text}')
@@ -763,10 +796,13 @@ async def punishments_cmd(message: types.Message, command: CommandObject, bot: B
                else message.answer(translator.get_string('punl_unknown_user')))
         return
 
-    target_label = await (_display_name(bot, message.chat.id, target_id) if is_group
+    target_label = await (_display_name_html(bot, message.chat.id, target_id) if is_group
                           else _global_name(bot, target_id))
+    if not is_group:
+        target_label = _esc(target_label)
     rows = db_man.get_punishments(target_id)
-    await message.answer(await _render_punishments(bot, rows, target_id, target_label, chat_ids, show_chat))
+    text = await _render_punishments(bot, rows, target_id, target_label, chat_ids, show_chat)
+    await message.answer(text, parse_mode='HTML')
 
 
 def _user_label(user: types.User) -> str:
@@ -1358,7 +1394,7 @@ async def rules_command(message: types.Message, bot: Bot) -> None:
         text = translator.get_string('rules_header') + '\n\n' + text
     else:
         text = translator.get_string('rules_not_set')
-    await _ianswer(message, text)
+    await _ianswer(message, text, disable_preview=True)
 
 
 @router.message(Command('stopchat'))

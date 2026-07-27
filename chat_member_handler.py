@@ -96,7 +96,8 @@ async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
         return
 
     if not db_man.welcome_within(chat_id, user_id, _WELCOME_COOLDOWN):
-        user_display = f'@{user.username}' if user.username else user.first_name
+        user_name = html.escape(user.full_name, quote=False)
+        user_display = f'<a href="tg://user?id={user_id}">{user_name}</a>'
         welcome_key = 'welcome_msg' if db_man.is_kick_enabled(chat_id) else 'welcome_msg_nokick'
         msg = translator.get_string(welcome_key).format(user_display)
 
@@ -120,7 +121,7 @@ async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
             if not _welcome_msg_by_user[uid]:
                 del _welcome_msg_by_user[uid]
 
-        sent = await bot.send_message(chat_id, msg, reply_markup=keyboard)
+        sent = await bot.send_message(chat_id, msg, reply_markup=keyboard, parse_mode='HTML')
         _welcome_msg_by_user.setdefault(user_id, []).append((chat_id, sent.message_id))
         db_man.set_pending_since(chat_id, user_id)
 
