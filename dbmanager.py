@@ -22,6 +22,8 @@ class DBManager:
 	def __init__(self):
 		self.connection = sqlite3.connect(config.DB_PATH, check_same_thread=False)
 		self.cursor = self.connection.cursor()
+		self._msg_buffer: list[tuple[int, int, int, int]] = []
+		self._channel_msg_buffer: list[tuple[int, int, int, int]] = []
 		tables = {row[0] for row in self.cursor.execute('SELECT name FROM sqlite_master WHERE type="table"').fetchall()}
 		if 'user' not in tables:
 			self.cursor.execute('CREATE TABLE user(id, verified, blocked_until)')
@@ -69,6 +71,12 @@ class DBManager:
 			self.cursor.execute('CREATE TABLE channels_banned(chat_id INTEGER PRIMARY KEY)')
 		if 'chat_perms' not in tables:
 			self.cursor.execute('CREATE TABLE chat_perms(chat_id INTEGER PRIMARY KEY, perms TEXT)')
+		if 'recent_messages' not in tables:
+			self.cursor.execute('CREATE TABLE recent_messages(chat_id INTEGER, user_id INTEGER, message_id INTEGER, ts INTEGER)')
+			self.cursor.execute('CREATE INDEX idx_recent_messages ON recent_messages(chat_id, user_id, ts)')
+		if 'recent_channel_messages' not in tables:
+			self.cursor.execute('CREATE TABLE recent_channel_messages(chat_id INTEGER, channel_id INTEGER, message_id INTEGER, ts INTEGER)')
+			self.cursor.execute('CREATE INDEX idx_recent_channel_messages ON recent_channel_messages(chat_id, channel_id, ts)')
 		log_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(action_log)').fetchall()}
 		if 'target_id' not in log_cols:
 			self.cursor.execute('ALTER TABLE action_log ADD COLUMN target_id INTEGER')
@@ -581,3 +589,75 @@ class DBManager:
 
 	def get_command_banned(self):
 		return [row[0] for row in self.cursor.execute('SELECT user_id FROM command_banned').fetchall()]
+
+	def log_message(self, chat_id, user_id, message_id, ts):
+		self._msg_buffer.append((chat_id, user_id, message_id, ts))
+
+	def flush_messages(self):
+		if not self._msg_buffer:
+			return
+		buffer, self._msg_buffer = self._msg_buffer, []
+		self.cursor.executemany(
+			'INSERT INTO recent_messages(chat_id, user_id, message_id, ts) VALUES (?, ?, ?, ?)',
+			buffer
+		)
+		self.connection.commit()
+
+	def purge_old_messages(self, cutoff):
+		self.cursor.execute('DELETE FROM recent_messages WHERE ts < ?', (cutoff,))
+		self.connection.commit()
+
+	def get_recent_messages(self, chat_id, user_id, since=None, limit=None):
+		query = 'SELECT message_id FROM recent_messages WHERE chat_id=? AND user_id=?'
+		params = [chat_id, user_id]
+		if since is not None:
+			query += ' AND ts>=?'
+			params.append(since)
+		query += ' ORDER BY ts DESC, message_id DESC'
+		if limit is not None:
+			query += ' LIMIT ?'
+			params.append(limit)
+		return [row[0] for row in self.cursor.execute(query, params).fetchall()]
+
+	def remove_messages(self, chat_id, user_id, message_ids):
+		self.cursor.executemany(
+			'DELETE FROM recent_messages WHERE chat_id=? AND user_id=? AND message_id=?',
+			[(chat_id, user_id, mid) for mid in message_ids]
+		)
+		self.connection.commit()
+
+	def log_channel_message(self, chat_id, channel_id, message_id, ts):
+		self._channel_msg_buffer.append((chat_id, channel_id, message_id, ts))
+
+	def flush_channel_messages(self):
+		if not self._channel_msg_buffer:
+			return
+		buffer, self._channel_msg_buffer = self._channel_msg_buffer, []
+		self.cursor.executemany(
+			'INSERT INTO recent_channel_messages(chat_id, channel_id, message_id, ts) VALUES (?, ?, ?, ?)',
+			buffer
+		)
+		self.connection.commit()
+
+	def purge_old_channel_messages(self, cutoff):
+		self.cursor.execute('DELETE FROM recent_channel_messages WHERE ts < ?', (cutoff,))
+		self.connection.commit()
+
+	def get_recent_channel_messages(self, chat_id, channel_id, since=None, limit=None):
+		query = 'SELECT message_id FROM recent_channel_messages WHERE chat_id=? AND channel_id=?'
+		params = [chat_id, channel_id]
+		if since is not None:
+			query += ' AND ts>=?'
+			params.append(since)
+		query += ' ORDER BY ts DESC, message_id DESC'
+		if limit is not None:
+			query += ' LIMIT ?'
+			params.append(limit)
+		return [row[0] for row in self.cursor.execute(query, params).fetchall()]
+
+	def remove_channel_messages(self, chat_id, channel_id, message_ids):
+		self.cursor.executemany(
+			'DELETE FROM recent_channel_messages WHERE chat_id=? AND channel_id=? AND message_id=?',
+			[(chat_id, channel_id, mid) for mid in message_ids]
+		)
+		self.connection.commit()

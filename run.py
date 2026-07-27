@@ -45,6 +45,8 @@ async def main():
         chat_member_handler.raid_reminder_task(bot),
         chat_member_handler.captcha_timeout_task(bot),
         chat_member_handler.pending_unban_retry_task(bot),
+        moderation_handler.flush_messages_task(),
+        moderation_handler.purge_old_messages_task(),
     )
 
 

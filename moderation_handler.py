@@ -49,6 +49,26 @@ def _spawn(coro: Awaitable[Any]) -> None:
     task.add_done_callback(_bg_tasks.discard)
 
 
+_MESSAGE_RETENTION = 2 * 24 * 3600
+_MESSAGE_FLUSH_INTERVAL = 10
+_MESSAGE_PURGE_INTERVAL = 1800
+
+
+async def flush_messages_task() -> None:
+    while True:
+        await asyncio.sleep(_MESSAGE_FLUSH_INTERVAL)
+        db_man.flush_messages()
+        db_man.flush_channel_messages()
+
+
+async def purge_old_messages_task() -> None:
+    while True:
+        await asyncio.sleep(_MESSAGE_PURGE_INTERVAL)
+        cutoff = db_man.unix_time() - _MESSAGE_RETENTION
+        db_man.purge_old_messages(cutoff)
+        db_man.purge_old_channel_messages(cutoff)
+
+
 class UserTrackingMiddleware(BaseMiddleware):
     """Records username → user_id for everyone the bot sees, so @username can be resolved later,
     and enforces the global blocklist on existing members who were never seen joining.
@@ -80,6 +100,10 @@ class UserTrackingMiddleware(BaseMiddleware):
         if event.chat and event.chat.type in _GROUP_TYPES:
             if db_man.remember_chat(event.chat.id):
                 _spawn(_sweep_blocklist_chat(event.bot, event.chat.id))
+            if event.sender_chat and event.sender_chat.type == 'channel':
+                db_man.log_channel_message(event.chat.id, event.sender_chat.id, event.message_id, db_man.unix_time())
+            elif user:
+                db_man.log_message(event.chat.id, user.id, event.message_id, db_man.unix_time())
             if (
                 user
                 and not permissions.is_owner(user.id)
@@ -1363,6 +1387,174 @@ async def delete_message(message: types.Message, bot: Bot) -> None:
     _cooldown_mark(message, 'delete')
 
 
+_COUNT_RE = re.compile(r'^c(\d+)$', re.IGNORECASE)
+_DELETE_ALL_CHUNK = 100
+_DELETE_ALL_CHUNK_DELAY = 1.0
+
+
+def _parse_delete_all_modifier(token: str):
+    """Return (since_ts | None, limit | None, dur_token | None, error_key | None) for a single
+    count (`c200`) or period (`1h`, `1d`, ...) modifier token. No token means 'everything stored'
+    (bounded by the 2-day retention window anyway). `dur_token` carries the raw duration token
+    when `since` is set, so the confirmation can spell it out.
+    """
+    if not token:
+        return None, None, None, None
+    count_match = _COUNT_RE.match(token)
+    if count_match:
+        return None, int(count_match.group(1)), None, None
+    seconds = _parse_duration(token)
+    if seconds is not None:
+        if seconds > _MESSAGE_RETENTION:
+            return None, None, None, 'deleteall_period_too_long'
+        return db_man.unix_time() - seconds, None, token, None
+    return None, None, None, 'deleteall_bad_arg'
+
+
+async def _parse_delete_all(message: types.Message, command: CommandObject, bot: Bot):
+    """Return (target_id, since_ts | None, limit | None, dur_token | None, error_key | None)."""
+    target_id, rest = await _parse_ban(message, command, bot)
+    if target_id is None:
+        return None, None, None, None, None
+    token = rest.strip().split()[0] if rest.strip() else ''
+    since, limit, dur_token, error_key = _parse_delete_all_modifier(token)
+    return target_id, since, limit, dur_token, error_key
+
+
+async def _delete_chunk(bot: Bot, chat_id: int, message_ids: list[int]) -> bool:
+    """Delete up to 100 messages in one call; retries once on a flood-control Retry-After."""
+    try:
+        await bot.delete_messages(chat_id, message_ids)
+        return True
+    except Exception as e:
+        retry_after = int(getattr(e, 'retry_after', 0) or 0)
+        if not retry_after:
+            return False
+        await asyncio.sleep(retry_after + 1)
+        try:
+            await bot.delete_messages(chat_id, message_ids)
+            return True
+        except Exception:
+            return False
+
+
+async def _run_delete_all_channel(message: types.Message, command: CommandObject, bot: Bot,
+                                   channel: types.Chat, *, silent: bool) -> bool:
+    """Bulk-delete a channel's tracked messages in this chat (reply-only, like channel bans)."""
+    token = (command.args or '').strip().split()[0] if (command.args or '').strip() else ''
+    since, limit, dur_token, error_key = _parse_delete_all_modifier(token)
+    if error_key:
+        await _ianswer(message, translator.get_string(error_key))
+        return False
+
+    db_man.flush_channel_messages()
+    message_ids = db_man.get_recent_channel_messages(message.chat.id, channel.id, since=since, limit=limit)
+    if not message_ids:
+        if not silent:
+            await _ianswer(message, translator.get_string('deleteall_none'))
+        return False
+
+    deleted = 0
+    for i in range(0, len(message_ids), _DELETE_ALL_CHUNK):
+        chunk = message_ids[i:i + _DELETE_ALL_CHUNK]
+        if await _delete_chunk(bot, message.chat.id, chunk):
+            db_man.remove_channel_messages(message.chat.id, channel.id, chunk)
+            deleted += len(chunk)
+        if i + _DELETE_ALL_CHUNK < len(message_ids):
+            await asyncio.sleep(_DELETE_ALL_CHUNK_DELAY)
+
+    channel_html = _channel_mention(channel)
+    suffix = translator.get_string('deleteall_log_suffix').format(deleted)
+    log_key = 'log_sdelete_all' if silent else 'log_delete_all'
+    _record_log(message.chat.id, message.from_user, log_key, (channel.title or str(channel.id)) + suffix, '', channel.id)
+
+    if not silent:
+        if limit is not None:
+            text = translator.get_string('deleteall_done_count').format(deleted, channel_html)
+        elif since is not None:
+            text = translator.get_string('deleteall_done_period').format(
+                deleted, _human_duration_words(dur_token), channel_html)
+        else:
+            text = translator.get_string('deleteall_done_all').format(deleted, channel_html)
+        await _ianswer_html(message, text)
+    return True
+
+
+async def _run_delete_all(message: types.Message, command: CommandObject, bot: Bot, *, silent: bool) -> bool:
+    """Shared implementation for /delete_all and /sdelete_all. Returns True if a deletion
+    attempt was actually made (for cooldown bookkeeping)."""
+    channel = _reply_channel(message)
+    if channel is not None:
+        return await _run_delete_all_channel(message, command, bot, channel, silent=silent)
+
+    target_id, since, limit, dur_token, error_key = await _parse_delete_all(message, command, bot)
+    if target_id is None:
+        provided = bool(message.reply_to_message) or bool((command.args or '').strip())
+        await _ianswer(message, translator.get_string('mod_user_not_found' if provided else 'mod_specify_user'))
+        return False
+    if error_key:
+        await _ianswer(message, translator.get_string(error_key))
+        return False
+    if await _is_bot_target(message, bot, target_id):
+        return False
+    if not await _hierarchy_ok(message, target_id):
+        return False
+
+    db_man.flush_messages()
+    message_ids = db_man.get_recent_messages(message.chat.id, target_id, since=since, limit=limit)
+    if not message_ids:
+        if not silent:
+            await _ianswer(message, translator.get_string('deleteall_none'))
+        return False
+
+    deleted = 0
+    for i in range(0, len(message_ids), _DELETE_ALL_CHUNK):
+        chunk = message_ids[i:i + _DELETE_ALL_CHUNK]
+        if await _delete_chunk(bot, message.chat.id, chunk):
+            db_man.remove_messages(message.chat.id, target_id, chunk)
+            deleted += len(chunk)
+        if i + _DELETE_ALL_CHUNK < len(message_ids):
+            await asyncio.sleep(_DELETE_ALL_CHUNK_DELAY)
+
+    target_html, target_label = await _punish_labels(bot, message, command, target_id)
+    suffix = translator.get_string('deleteall_log_suffix').format(deleted)
+    log_key = 'log_sdelete_all' if silent else 'log_delete_all'
+    _log_action(message, log_key, target_label + suffix, '', target_id)
+
+    if not silent:
+        if limit is not None:
+            text = translator.get_string('deleteall_done_count').format(deleted, target_html)
+        elif since is not None:
+            text = translator.get_string('deleteall_done_period').format(
+                deleted, _human_duration_words(dur_token), target_html)
+        else:
+            text = translator.get_string('deleteall_done_all').format(deleted, target_html)
+        await _ianswer_html(message, text)
+    return True
+
+
+@router.message(Command('delete_all'))
+async def delete_all_cmd(message: types.Message, command: CommandObject, bot: Bot) -> None:
+    """Bulk-delete a user's tracked messages in this chat: all of them, the last N (`c200`),
+    or everything from the last period (`1h`, `1d`, ...). Moderators and up."""
+    await _delete_silently(message)
+    if not await _require(message, permissions.is_staff(db_man, message.chat.id, message.from_user.id)):
+        return
+    if not await _cooldown_guard(message, 'delete_all'):
+        return
+    if await _run_delete_all(message, command, bot, silent=False):
+        _cooldown_mark(message, 'delete_all')
+
+
+@router.message(Command('sdelete_all'))
+async def sdelete_all_cmd(message: types.Message, command: CommandObject, bot: Bot) -> None:
+    """Silent variant of /delete_all: same bulk deletion, nothing posted to the chat. Admins and up."""
+    await _delete_silently(message)
+    if not await _require(message, permissions.can_manage_roles(db_man, message.chat.id, message.from_user.id)):
+        return
+    await _run_delete_all(message, command, bot, silent=True)
+
+
 @router.message(Command('raid_on'))
 async def raid_on(message: types.Message, bot: Bot) -> None:
     """Enable anti-raid: every newcomer is locally banned, silently, with no captcha."""
@@ -1517,7 +1709,7 @@ def _human_duration_words(token: str) -> str:
     return f'{count} {word}'
 
 
-_COOLDOWN_COMMANDS = ['ban', 'mute', 'unmute', 'unban', 'delete']
+_COOLDOWN_COMMANDS = ['ban', 'mute', 'unmute', 'unban', 'delete', 'delete_all']
 
 
 def _human_time(seconds: int) -> str:
