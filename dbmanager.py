@@ -435,6 +435,10 @@ class DBManager:
 		)
 		self.connection.commit()
 
+	def remove_all_pending_unbans(self, user_id):
+		self.cursor.execute('DELETE FROM pending_unbans WHERE user_id=?', (user_id,))
+		self.connection.commit()
+
 	def remove_pending_unban(self, chat_id, user_id):
 		self.cursor.execute('DELETE FROM pending_unbans WHERE chat_id=? AND user_id=?', (chat_id, user_id))
 		self.connection.commit()
@@ -659,5 +663,34 @@ class DBManager:
 		self.cursor.executemany(
 			'DELETE FROM recent_channel_messages WHERE chat_id=? AND channel_id=? AND message_id=?',
 			[(chat_id, channel_id, mid) for mid in message_ids]
+		)
+		self.connection.commit()
+
+	def get_recent_chat_messages(self, chat_id, since=None, limit=None):
+		"""Tracked message ids in this chat from anyone (users and channels), newest first."""
+		query = (
+			'SELECT message_id, ts FROM ('
+			'SELECT message_id, ts FROM recent_messages WHERE chat_id=? '
+			'UNION ALL '
+			'SELECT message_id, ts FROM recent_channel_messages WHERE chat_id=?)'
+		)
+		params = [chat_id, chat_id]
+		if since is not None:
+			query += ' WHERE ts>=?'
+			params.append(since)
+		query += ' ORDER BY ts DESC, message_id DESC'
+		if limit is not None:
+			query += ' LIMIT ?'
+			params.append(limit)
+		return [row[0] for row in self.cursor.execute(query, params).fetchall()]
+
+	def remove_chat_messages(self, chat_id, message_ids):
+		self.cursor.executemany(
+			'DELETE FROM recent_messages WHERE chat_id=? AND message_id=?',
+			[(chat_id, mid) for mid in message_ids]
+		)
+		self.cursor.executemany(
+			'DELETE FROM recent_channel_messages WHERE chat_id=? AND message_id=?',
+			[(chat_id, mid) for mid in message_ids]
 		)
 		self.connection.commit()
