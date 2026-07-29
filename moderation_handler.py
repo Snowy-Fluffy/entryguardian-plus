@@ -805,13 +805,16 @@ async def _captcha_visit_lines(bot: Bot, target_id: int) -> list[str]:
 
 
 async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label: str,
-                              chat_ids: set[int], show_chat: bool) -> str:
-    """Render a user's punishment history from get_punishments() rows, scoped to chat_ids.
-    Never includes IP/User-Agent — that's owner-only, DM-only, shown by /uinfo instead."""
-    header_lines = [_first_seen_line(target_id)]
+                              chat_ids: set[int], show_chat: bool, *, include_first_seen: bool = True) -> str:
+    """Render a user's/channel's punishment history from get_punishments() rows, scoped to
+    chat_ids. Never includes IP/User-Agent — that's owner-only, DM-only, shown by /uinfo
+    instead. include_first_seen is False for channels: they're never in seen_users (only real
+    users are tracked there), so 'first seen' would just be a meaningless backfilled 'now'."""
+    header_lines = [_first_seen_line(target_id)] if include_first_seen else []
     rows = [r for r in rows if r[2] in _PUNISH_LOG_KEYS and r[0] in chat_ids]
     if not rows:
-        return '\n'.join(header_lines) + '\n' + translator.get_string('punl_empty').format(target_label)
+        empty = translator.get_string('punl_empty').format(target_label)
+        return ('\n'.join(header_lines) + '\n' + empty) if header_lines else empty
     lines = header_lines + [translator.get_string('punl_header').format(target_label, len(rows))]
     titles: dict[int, str] = {}
     for chat_id, ts, _action_key, text in rows[:_PUNL_MAX]:
@@ -831,8 +834,9 @@ async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label
 
 @router.message(Command('punl'))
 async def punishments_cmd(message: types.Message, command: CommandObject, bot: Bot) -> None:
-    """Show a user's punishment history. In a group: staff only, scoped to that chat.
-    In DM: owners/admins, aggregated across the chats they manage."""
+    """Show a user's (or, by replying to a channel's post, a channel's) punishment history.
+    In a group: staff only, scoped to that chat. In DM: owners/admins, aggregated across the
+    chats they manage."""
     await _delete_silently(message)
     is_group = message.chat.type in _GROUP_TYPES
     user_id = message.from_user.id
@@ -848,25 +852,33 @@ async def punishments_cmd(message: types.Message, command: CommandObject, bot: B
             return
         chat_ids, show_chat = set(_accessible_chats(user_id)), True
 
-    target_id = await _resolve_target(message, command, bot)
-    if target_id is None:
-        provided = bool(message.reply_to_message) or bool((command.args or '').strip())
-        key = 'mod_user_not_found' if provided else 'mod_specify_user'
-        await (_ianswer(message, translator.get_string(key)) if is_group
-               else message.answer(translator.get_string(key)))
-        return
+    channel = _reply_channel(message)
+    if channel is not None:
+        target_id = channel.id
+        target_label = _channel_mention(channel)
+        include_first_seen = False
+    else:
+        target_id = await _resolve_target(message, command, bot)
+        if target_id is None:
+            provided = bool(message.reply_to_message) or bool((command.args or '').strip())
+            key = 'mod_user_not_found' if provided else 'mod_specify_user'
+            await (_ianswer(message, translator.get_string(key)) if is_group
+                   else message.answer(translator.get_string(key)))
+            return
+        target_label = await (_display_name_html(bot, message.chat.id, target_id) if is_group
+                              else _global_name(bot, target_id))
+        if not is_group:
+            target_label = _esc(target_label)
+        include_first_seen = True
 
     if not db_man.user_has_any_record(target_id):
         await (_ianswer(message, translator.get_string('punl_unknown_user')) if is_group
                else message.answer(translator.get_string('punl_unknown_user')))
         return
 
-    target_label = await (_display_name_html(bot, message.chat.id, target_id) if is_group
-                          else _global_name(bot, target_id))
-    if not is_group:
-        target_label = _esc(target_label)
     rows = db_man.get_punishments(target_id)
-    text = await _render_punishments(bot, rows, target_id, target_label, chat_ids, show_chat)
+    text = await _render_punishments(bot, rows, target_id, target_label, chat_ids, show_chat,
+                                     include_first_seen=include_first_seen)
     await message.answer(text, parse_mode='HTML', link_preview_options=types.LinkPreviewOptions(is_disabled=True))
 
 
