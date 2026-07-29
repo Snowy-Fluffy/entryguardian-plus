@@ -15,15 +15,21 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import asyncio
+import ipaddress
 import os
+import re
 import secrets
 import time
+from collections import deque
 import aiohttp
 from aiohttp import web
 from altcha import Payload, create_challenge, verify_solution
 from captcha.image import ImageCaptcha
 import config
 import session_manager
+from dbmanager import DBManager
+
+db_man = DBManager()
 
 _ALTCHA_HMAC_SECRET = secrets.token_hex(32)
 _ALTCHA_ALGORITHM = 'PBKDF2/SHA-512'
@@ -45,6 +51,79 @@ _ALLOWED_ASSET_EXTS = frozenset({
 })
 
 _wrapper_template: str | None = None
+
+_RATE_LIMITED_PREFIXES = ('/captcha/', '/api/captcha/')
+
+_rate_buckets: dict[str, deque] = {}
+
+
+def _is_valid_ip(value: str) -> bool:
+    try:
+        ipaddress.ip_address(value)
+        return True
+    except ValueError:
+        return False
+
+
+def _client_ip(request: web.Request) -> str:
+    """Resolve the visitor's real IP. Behind a reverse proxy (nginx, per the README setup) —
+    and especially through Docker's published-port NAT — `request.remote` is only the proxy's
+    (or Docker gateway's) own address, never the actual visitor's. Prefer the headers nginx
+    sets from its real-ip-restored $remote_addr, falling back to the raw TCP peer only if
+    proxy headers are disabled/absent/malformed."""
+    if config.TRUST_PROXY_HEADERS:
+        real_ip = (request.headers.get('X-Real-IP') or '').strip()
+        if real_ip and _is_valid_ip(real_ip):
+            return real_ip
+        forwarded = request.headers.get('X-Forwarded-For', '')
+        if forwarded:
+            candidate = forwarded.split(',')[0].strip()
+            if _is_valid_ip(candidate):
+                return candidate
+    return request.remote or 'unknown'
+
+
+_UA_MAX_LEN = 300
+_CONTROL_CHARS_RE = re.compile(r'[\x00-\x1f\x7f]')
+
+
+def _sanitize_user_agent(raw: str) -> str:
+    """Clean an untrusted User-Agent header before storing it. Parameterized SQL queries
+    already make injection impossible regardless of content; this is about not persisting
+    control characters (which could otherwise mangle logs/terminals) or unbounded garbage —
+    it's still HTML-escaped again on display in /punl."""
+    return _CONTROL_CHARS_RE.sub('', raw)[:_UA_MAX_LEN]
+
+
+@web.middleware
+async def rate_limit_middleware(request: web.Request, handler):
+    """Simple sliding-window rate limit per IP on the captcha page/API, so a script hitting
+    these endpoints directly (bypassing the minigame's own pacing) can't flood them."""
+    if not request.path.startswith(_RATE_LIMITED_PREFIXES):
+        return await handler(request)
+    ip = _client_ip(request)
+    now = time.time()
+    bucket = _rate_buckets.setdefault(ip, deque())
+    while bucket and now - bucket[0] > config.RATE_LIMIT_WINDOW:
+        bucket.popleft()
+    if len(bucket) >= config.RATE_LIMIT_MAX:
+        return web.json_response({'error': 'rate limited'}, status=429)
+    bucket.append(now)
+    return await handler(request)
+
+
+async def rate_limit_cleanup_task() -> None:
+    """Drop rate-limit buckets that have gone quiet, so idle/rotating IPs don't accumulate
+    in memory forever."""
+    while True:
+        await asyncio.sleep(300)
+        now = time.time()
+        for ip in list(_rate_buckets.keys()):
+            bucket = _rate_buckets[ip]
+            while bucket and now - bucket[0] > config.RATE_LIMIT_WINDOW:
+                bucket.popleft()
+            if not bucket:
+                del _rate_buckets[ip]
 
 
 def _get_wrapper_template() -> str:
@@ -128,6 +207,15 @@ async def handle_captcha_page(request: web.Request) -> web.Response:
     session = session_manager.sessions.get(session_id)
     if not session or session_manager.is_expired(session_id):
         return web.Response(text=_ERROR_HTML, content_type='text/html', status=410)
+
+    if config.COLLECT_CAPTCHA_IPS:
+        db_man.record_first_captcha_visit(
+            session['user_id'],
+            _client_ip(request),
+            _sanitize_user_agent(request.headers.get('User-Agent', '')),
+            int(time.time()),
+        )
+
     if session.get('completed') and session.get('code'):
         html = _COMPLETED_HTML_TMPL.format(session_id=session_id)
         return web.Response(text=html, content_type='text/html')
@@ -178,8 +266,9 @@ async def handle_verify_turnstile(request: web.Request) -> web.Response:
         return web.json_response({'error': 'missing token'}, status=400)
 
     form = {'secret': config.TURNSTILE_SECRET_KEY, 'response': token}
-    if request.remote:
-        form['remoteip'] = request.remote
+    client_ip = _client_ip(request)
+    if client_ip and client_ip != 'unknown':
+        form['remoteip'] = client_ip
 
     try:
         async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as http:
@@ -281,7 +370,7 @@ async def handle_doom_file(request: web.Request) -> web.FileResponse:
 
 
 def create_app() -> web.Application:
-    app = web.Application()
+    app = web.Application(middlewares=[rate_limit_middleware])
     app.router.add_get('/captcha/{uuid}', handle_captcha_page)
     app.router.add_post('/api/captcha/{uuid}/kill', handle_kill)
     app.router.add_post('/api/captcha/{uuid}/complete', handle_complete)

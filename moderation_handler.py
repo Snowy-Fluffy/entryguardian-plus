@@ -18,6 +18,7 @@ from typing import Any, Awaitable, Callable
 from datetime import datetime
 import asyncio
 import html
+import ipaddress
 import re
 import aiohttp
 from aiogram import Router, types, Bot, BaseMiddleware, F
@@ -766,13 +767,52 @@ def _first_seen_line(target_id: int) -> str:
     return translator.get_string('punl_first_seen').format(when)
 
 
+def _ip_link(ip: str) -> str:
+    """Render an IP as a clickable https://ipinfo.io/<ip> link. Falls back to plain escaped
+    text if it isn't actually a well-formed IP (e.g. an old 'unknown' placeholder)."""
+    escaped = _esc(ip)
+    try:
+        ipaddress.ip_address(ip)
+    except ValueError:
+        return escaped
+    return f'<a href="https://ipinfo.io/{escaped}">{escaped}</a>'
+
+
+async def _captcha_visit_lines(bot: Bot, target_id: int) -> list[str]:
+    """The 'IP:'/'User-Agent:'/same-IP lines shown in /uinfo below 'First seen:', if the
+    opt-in IP collection is on and a first-visit record exists. Each field is shown
+    independently and only when present, so e.g. an empty User-Agent header doesn't produce
+    a blank line. Both fields are HTML-escaped like any other user-supplied text shown in a
+    message (the User-Agent is also sanitized/capped before it's ever stored)."""
+    if not config.COLLECT_CAPTCHA_IPS:
+        return []
+    record = db_man.get_captcha_ip(target_id)
+    if not record:
+        return []
+    ip, user_agent, _ts = record
+    lines = []
+    if ip:
+        lines.append(translator.get_string('punl_captcha_ip').format(_ip_link(ip)))
+    if user_agent:
+        lines.append(translator.get_string('punl_captcha_ua').format(_esc(user_agent)))
+    if ip:
+        others = [uid for uid in db_man.get_users_by_ip(ip) if uid != target_id]
+        if others:
+            lines.append(translator.get_string('uinfo_same_ip_header').format(len(others)))
+            for uid in others:
+                lines.append(_esc(await _global_name(bot, uid)))
+    return lines
+
+
 async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label: str,
                               chat_ids: set[int], show_chat: bool) -> str:
-    """Render a user's punishment history from get_punishments() rows, scoped to chat_ids."""
+    """Render a user's punishment history from get_punishments() rows, scoped to chat_ids.
+    Never includes IP/User-Agent — that's owner-only, DM-only, shown by /uinfo instead."""
+    header_lines = [_first_seen_line(target_id)]
     rows = [r for r in rows if r[2] in _PUNISH_LOG_KEYS and r[0] in chat_ids]
     if not rows:
-        return _first_seen_line(target_id) + '\n' + translator.get_string('punl_empty').format(target_label)
-    lines = [_first_seen_line(target_id), translator.get_string('punl_header').format(target_label, len(rows))]
+        return '\n'.join(header_lines) + '\n' + translator.get_string('punl_empty').format(target_label)
+    lines = header_lines + [translator.get_string('punl_header').format(target_label, len(rows))]
     titles: dict[int, str] = {}
     for chat_id, ts, _action_key, text in rows[:_PUNL_MAX]:
         when = datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M:%S')
@@ -827,7 +867,35 @@ async def punishments_cmd(message: types.Message, command: CommandObject, bot: B
         target_label = _esc(target_label)
     rows = db_man.get_punishments(target_id)
     text = await _render_punishments(bot, rows, target_id, target_label, chat_ids, show_chat)
-    await message.answer(text, parse_mode='HTML')
+    await message.answer(text, parse_mode='HTML', link_preview_options=types.LinkPreviewOptions(is_disabled=True))
+
+
+@router.message(Command('uinfo'))
+async def uinfo_cmd(message: types.Message, command: CommandObject, bot: Bot) -> None:
+    """Owner-only, DM-only: first-seen date plus the captured IP/User-Agent
+    (config.COLLECT_CAPTCHA_IPS) — no punishment history here, that's what /punl is for.
+    Silently ignored outside a private chat (doesn't even hint the command exists)."""
+    if message.chat.type != 'private':
+        return
+    user_id = message.from_user.id
+    if not permissions.is_owner(user_id):
+        await message.answer(translator.get_string('mod_no_permission'))
+        return
+
+    target_id = await _resolve_target(message, command, bot)
+    if target_id is None:
+        provided = bool(message.reply_to_message) or bool((command.args or '').strip())
+        key = 'mod_user_not_found' if provided else 'mod_specify_user'
+        await message.answer(translator.get_string(key))
+        return
+
+    if not db_man.user_has_any_record(target_id):
+        await message.answer(translator.get_string('punl_unknown_user'))
+        return
+
+    lines = [_first_seen_line(target_id)] + await _captcha_visit_lines(bot, target_id)
+    await message.answer('\n'.join(lines), parse_mode='HTML',
+                         link_preview_options=types.LinkPreviewOptions(is_disabled=True))
 
 
 def _user_label(user: types.User) -> str:
@@ -2159,16 +2227,15 @@ async def _build_chat_menu(bot: Bot, chat_id: int, user_id: int) -> tuple[str, I
             ),
             callback_data=f'adm:kick:{chat_id}',
         )],
-        [InlineKeyboardButton(text=translator.get_string('admin_btn_perms'), callback_data=f'adm:perm:{chat_id}')],
-        [InlineKeyboardButton(text=translator.get_string('admin_btn_gbans'), callback_data=f'adm:gb:{chat_id}')],
-    ]
-    if db_man.is_join_request_chat(chat_id):
-        keyboard.append([InlineKeyboardButton(
+        [InlineKeyboardButton(
             text=translator.get_string(
                 'admin_btn_autoaccept_on' if db_man.is_auto_accept(chat_id) else 'admin_btn_autoaccept_off'
             ),
             callback_data=f'adm:jreq:{chat_id}',
-        )])
+        )],
+        [InlineKeyboardButton(text=translator.get_string('admin_btn_perms'), callback_data=f'adm:perm:{chat_id}')],
+        [InlineKeyboardButton(text=translator.get_string('admin_btn_gbans'), callback_data=f'adm:gb:{chat_id}')],
+    ]
     if permissions.is_owner(user_id):
         keyboard.append([InlineKeyboardButton(
             text=translator.get_string('admin_btn_start' if db_man.is_chat_stopped(chat_id) else 'admin_btn_stop'),

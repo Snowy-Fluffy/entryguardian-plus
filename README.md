@@ -25,7 +25,7 @@ Sessions expire after 10 minutes. Failed code attempts are limited; too many wro
 | **Tetris** | Place N pieces on target slots | N placement events + minimum play time |
 | **Mario** | Reach the flagpole (shortened 1-1 level) | Flagpole event + minimum time from page load to flagpole (≥ 5 s) |
 
-All types share a common server-side defense: a per-session **challenge token** (generated at page load, required for every API call) and a **minimum play time** check before `/complete` is accepted.
+All types share a common server-side defense: a per-session **challenge token** (generated at page load, required for every API call) and a **minimum play time** check before `/complete` is accepted. On top of that, the captcha web endpoints (`/captcha/*` and `/api/captcha/*`) are **rate-limited per IP** (`RATE_LIMIT_MAX` requests per `RATE_LIMIT_WINDOW` seconds, default 40/10s) so a script hitting them directly — bypassing the minigame's own pacing — can't flood them.
 
 ## Requirements
 
@@ -82,6 +82,20 @@ OWNERS=                   # comma-separated Telegram user IDs of bot owners (ful
 # 0 = off, 1 = telecrm.xyz only, 2 = Apify only, 3 = both (telecrm.xyz primary, Apify fallback)
 USERNAME_RESOLVE=0
 APIFY_TOKEN=                # Apify API token, required for modes 2 and 3
+
+# Per-IP rate limit on the captcha web endpoints (/captcha/* and /api/captcha/*)
+RATE_LIMIT_MAX=40           # requests per RATE_LIMIT_WINDOW seconds, per IP
+RATE_LIMIT_WINDOW=10
+
+# Trust X-Real-IP/X-Forwarded-For from nginx instead of the raw TCP peer (which behind any
+# reverse proxy, and especially through Docker's published-port NAT, is only the proxy's own
+# address). Keep on for the nginx setup below; turn off only if the port is ever reachable
+# directly, bypassing nginx.
+TRUST_PROXY_HEADERS=1
+
+# Optional: remember the IP + User-Agent seen the FIRST time a user opens their captcha page,
+# shown in /punl. Off by default (stores personal data) — see "Moderation" below.
+COLLECT_CAPTCHA_IPS=0
 ```
 
 ## Moderation
@@ -117,7 +131,8 @@ The bot has a per-chat role system with three levels:
 | `/sdelete_user` | admins, owners | Silent variant of `/delete_user` — same bulk deletion, nothing posted to the chat |
 | `/delete_chat [c<N>\|period]` | admins, owners | Same as `/delete_user`, but for **every tracked message in the chat, from anyone** (users and channels alike) — no target. `/delete_chat c500` clears the last 500 tracked messages, `/delete_chat 1h` clears everything tracked from the last hour, plain `/delete_chat` clears everything tracked (up to the 2-day window) |
 | `/sdelete_chat` | admins, owners | Silent variant of `/delete_chat` — same bulk deletion, nothing posted to the chat |
-| `/punl` | moderators, admins, owners (in a group); admins/owners (in DM) | Show a user's **punishment history** (bans, mutes, their reversals, deletions). Target by reply, ID or @username. In a group it covers that chat; sent in DM it aggregates across every chat the requester manages, labelling each entry with its chat |
+| `/punl` | moderators, admins, owners (in a group); admins/owners (in DM) | Show a user's **punishment history** (bans, mutes, their reversals, deletions) plus "First seen". Target by reply, ID or @username. In a group it covers that chat; sent in DM it aggregates across every chat the requester manages, labelling each entry with its chat |
+| `/uinfo` | owners only, **private chat with the bot only** (silently ignored elsewhere) | Show a user's "First seen" plus, if `COLLECT_CAPTCHA_IPS` is on and recorded, the IP/User-Agent from their first captcha visit — no punishment history (use `/punl` for that). Target by reply, ID or @username |
 | `/raid_on` | admins, owners | Enable **anti-raid** in this chat: every newcomer is locally banned, silently, with no captcha shown. The blocklist ID check still runs. While on, the bot posts a reminder every 5 minutes with how many were banned, so it isn't left on by accident |
 | `/raid_off` | admins, owners | Disable anti-raid |
 | `/add_adm` | admins, owners | Make the target user an admin of this chat |
@@ -139,6 +154,8 @@ If even the cache misses, the bot can optionally resolve the `@username` through
 Command messages are deleted automatically after they are processed (the bot needs the *delete messages* admin right for this).
 
 **Message tracking for `/delete_user`/`/delete_chat`:** the bot keeps a rolling 2-day log of `(chat, user, message id, timestamp)` for every group message it sees, and separately `(chat, channel, message id, timestamp)` for messages posted as a channel (channel posts otherwise all share one anonymous `@Channel_Bot` sender, so they're tracked by the real channel id instead) — no message content, just enough to locate and delete them later, auto-expired in the background. This backs the bulk-delete commands — deleting a raider's (or spam channel's, or a whole flood's) messages in bulk — and is capped at 2 days because that's also the limit of how old a message Telegram lets a bot delete.
+
+**Captcha IP/User-Agent tracking (opt-in):** when `COLLECT_CAPTCHA_IPS=1`, the bot remembers the IP address and User-Agent seen the **first** time a user opens their captcha page — the IP of the browser that opened the link, i.e. the user's own. Only that first record is kept: reloading the page, requesting a new captcha later, etc. never overwrites it. Shown only via `/uinfo` (owners, private chat with the bot only — never in `/punl`, which staff/admins can also reach) as separate "IP:"/"User-Agent:" lines below "First seen:" — each only appears if that particular field was actually captured (e.g. no User-Agent header means no "User-Agent:" line), and both are simply absent if the feature has never recorded anything for that user. The IP is a clickable link to `https://ipinfo.io/<ip>` for a quick lookup. This is meant to help spot several Telegram accounts opening the captcha from the same IP (a sign of one operator running multiple accounts), not as an automatic ban signal — shared/mobile IPs (CGNAT) make IP alone unreliable for that. The User-Agent is sanitized before storage (control characters stripped, capped to 300 chars) and HTML-escaped again on display; both fields are always written via parameterized queries, so neither can affect the database regardless of content. Both are stored unencrypted, so treat them as personal data subject to whatever retention/consent rules apply in your jurisdiction. Off by default.
 
 The **global** commands (`/gban`, `/sgban`, `/gmute`, `/gsmute`, `/ungban`, `/unsgban`, `/ungmute`, `/ungsmute`) can also be sent in a **private chat with the bot** by owners and by anyone who is an admin of at least one chat (target by ID or @username). When issued from DM the broadcast to all chats omits the source chat — it just says "globally banned/muted/…" — and the issuer gets a confirmation in DM. Logging from DM goes to each chat the issuer administers (owners aren't logged). Silent variants still post and DM nothing to the chats/target.
 
@@ -188,10 +205,14 @@ The web server listens on `127.0.0.1:8080` on the host. Proxy it with nginx:
 ```nginx
 location /captcha/ {
     proxy_pass http://127.0.0.1:8080/captcha/;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 }
 
 location /api/captcha/ {
     proxy_pass http://127.0.0.1:8080/api/captcha/;
+    proxy_set_header X-Real-IP $remote_addr;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
 }
 
 location /doom/ {
@@ -212,6 +233,8 @@ location /altcha/ {
 ```
 
 > **Note:** set `WEB_HOST=0.0.0.0` in `.env` — inside Docker the container's loopback is not reachable from the host.
+
+> **Real client IP:** the bot resolves the visitor's IP (used by the rate limiter, Cloudflare Turnstile's `remoteip`, and the optional captcha-IP tracking below) from the `X-Real-IP`/`X-Forwarded-For` headers set above — never from the raw TCP connection, which behind nginx (and especially through Docker's published-port NAT) is only nginx's/Docker's own address. If nginx itself sits behind Cloudflare, first restore the real visitor IP with nginx's `real_ip` module (`real_ip_header CF-Connecting-IP;` + `set_real_ip_from <Cloudflare ranges>;` at the `http` level) so `$remote_addr` above is already correct — otherwise you'd just be forwarding Cloudflare's edge IP instead. This behavior is controlled by `TRUST_PROXY_HEADERS` (on by default).
 
 ## Running without Docker
 

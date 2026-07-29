@@ -41,6 +41,7 @@ async def main():
     await asyncio.gather(
         dp.start_polling(bot, allowed_updates=['message', 'chat_member', 'my_chat_member', 'message_reaction', 'callback_query', 'chat_join_request']),
         webserver.start_server(),
+        webserver.rate_limit_cleanup_task(),
         personal_msg_handler.session_expiry_task(bot),
         chat_member_handler.raid_reminder_task(bot),
         chat_member_handler.captcha_timeout_task(bot),

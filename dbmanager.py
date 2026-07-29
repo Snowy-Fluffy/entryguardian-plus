@@ -81,6 +81,11 @@ class DBManager:
 			self.cursor.execute('CREATE TABLE join_request_chats(chat_id INTEGER PRIMARY KEY)')
 		if 'auto_accept' not in tables:
 			self.cursor.execute('CREATE TABLE auto_accept(chat_id INTEGER PRIMARY KEY)')
+		if 'captcha_ips' not in tables:
+			self.cursor.execute('CREATE TABLE captcha_ips(user_id INTEGER PRIMARY KEY, ip TEXT, user_agent TEXT, ts INTEGER)')
+		captcha_ip_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(captcha_ips)').fetchall()}
+		if 'user_agent' not in captcha_ip_cols:
+			self.cursor.execute('ALTER TABLE captcha_ips ADD COLUMN user_agent TEXT')
 		log_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(action_log)').fetchall()}
 		if 'target_id' not in log_cols:
 			self.cursor.execute('ALTER TABLE action_log ADD COLUMN target_id INTEGER')
@@ -280,6 +285,7 @@ class DBManager:
 		('global_mutes', 'user_id'),
 		('cooldown_use', 'user_id'),
 		('command_banned', 'user_id'),
+		('captcha_ips', 'user_id'),
 	)
 
 	def user_has_any_record(self, user_id):
@@ -482,6 +488,29 @@ class DBManager:
 
 	def is_auto_accept(self, chat_id):
 		return bool(self.cursor.execute('SELECT 1 FROM auto_accept WHERE chat_id=?', (chat_id,)).fetchone())
+
+	def record_first_captcha_visit(self, user_id, ip, user_agent, ts):
+		"""Remember the IP/User-Agent seen the first time this user opened a captcha page.
+		Only the very first record is kept — later visits (reloads, new sessions) never
+		overwrite it. Opt-in (config.COLLECT_CAPTCHA_IPS)."""
+		self.cursor.execute(
+			'INSERT OR IGNORE INTO captcha_ips(user_id, ip, user_agent, ts) VALUES (?, ?, ?, ?)',
+			(user_id, ip, user_agent, ts)
+		)
+		self.connection.commit()
+
+	def get_captcha_ip(self, user_id):
+		row = self.cursor.execute(
+			'SELECT ip, user_agent, ts FROM captcha_ips WHERE user_id=?', (user_id,)
+		).fetchone()
+		return (row[0], row[1], row[2]) if row else None
+
+	def get_users_by_ip(self, ip):
+		"""Every user_id whose first-captcha-visit IP matches — used to spot several Telegram
+		accounts opening the captcha from the same IP."""
+		return [row[0] for row in self.cursor.execute(
+			'SELECT user_id FROM captcha_ips WHERE ip=?', (ip,)
+		).fetchall()]
 
 	def set_rules(self, chat_id, text):
 		if text:

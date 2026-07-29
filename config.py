@@ -41,3 +41,18 @@ TURNSTILE_SECRET_KEY: str = os.getenv('TURNSTILE_SECRET_KEY', '')
 TURNSTILE_ENABLED: bool = bool(TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY)
 USERNAME_RESOLVE: int = int(os.getenv('USERNAME_RESOLVE', '0'))
 APIFY_TOKEN: str = os.getenv('APIFY_TOKEN', '')
+
+# Per-IP rate limit on the captcha web endpoints (/captcha/* and /api/captcha/*).
+RATE_LIMIT_MAX: int = int(os.getenv('RATE_LIMIT_MAX', '40'))
+RATE_LIMIT_WINDOW: float = float(os.getenv('RATE_LIMIT_WINDOW', '10'))
+
+# Trust X-Real-IP / X-Forwarded-For from the reverse proxy in front of the web server (nginx,
+# per the README setup) instead of the raw TCP peer address — which, behind any reverse proxy
+# (and especially through Docker's published-port NAT), is only the proxy's own address, not
+# the visitor's. Only disable this if the web server is ever reachable directly, bypassing
+# your reverse proxy — otherwise a client could spoof its own IP via these headers.
+TRUST_PROXY_HEADERS: bool = os.getenv('TRUST_PROXY_HEADERS', '1').strip().lower() in ('1', 'true', 'yes', 'on')
+
+# Optional: remember the IP address a user solved the captcha from (shown in /punl).
+# Off by default — enabling this stores personal data (IP addresses), so it's opt-in.
+COLLECT_CAPTCHA_IPS: bool = os.getenv('COLLECT_CAPTCHA_IPS', '0').strip().lower() in ('1', 'true', 'yes', 'on')
