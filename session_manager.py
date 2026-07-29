@@ -23,7 +23,7 @@ import config
 sessions: dict[str, dict] = {}
 
 _CODE_CHARS = string.ascii_uppercase + string.digits
-_CODE_LEN = 8
+_CODE_LEN = 6
 
 
 def _generate_code() -> str:
@@ -42,6 +42,9 @@ def create_session(user_id: int, captcha_type: str = 'doom') -> str:
         'kills_registered': 0,
         'last_kill_at': 0.0,
         'captcha_type': captcha_type,
+        'game_passed': False,
+        'turnstile_passed': False,
+        'altcha_passed': False,
     }
     return session_id
 
@@ -85,7 +88,7 @@ def _required_interactions(session: dict) -> int:
 def register_kill(session_id: str, challenge: str) -> bool:
     """Register one enemy kill / piece placement server-side."""
     session = sessions.get(session_id)
-    if not session or is_expired(session_id) or session['completed']:
+    if not session or is_expired(session_id) or session['completed'] or session['game_passed']:
         return False
     if session.get('challenge') != challenge:
         return False
@@ -105,19 +108,58 @@ def register_kill(session_id: str, challenge: str) -> bool:
     return True
 
 
-def complete_session(session_id: str, challenge: str) -> str | None:
-    """Validate proof-of-play and mark session as completed. Returns code or None on failure."""
+def mark_game_passed(session_id: str, challenge: str) -> bool:
+    """Validate minigame proof-of-play. First stage of the verification chain."""
+    session = sessions.get(session_id)
+    if not session or is_expired(session_id):
+        return False
+    if session['completed'] or session['game_passed']:
+        return False
+    if session.get('challenge') != challenge:
+        return False
+    page_loaded_at = session.get('page_loaded_at') or 0
+    if time.time() - page_loaded_at < config.MIN_PLAY_TIME:
+        return False
+    if session['kills_registered'] < _required_interactions(session):
+        return False
+    session['game_passed'] = True
+    return True
+
+
+def mark_turnstile_passed(session_id: str, challenge: str) -> bool:
+    """Second stage: Cloudflare Turnstile verified server-side."""
+    session = sessions.get(session_id)
+    if not session or is_expired(session_id) or session['completed']:
+        return False
+    if session.get('challenge') != challenge:
+        return False
+    if not session['game_passed']:
+        return False
+    session['turnstile_passed'] = True
+    return True
+
+
+def mark_altcha_passed(session_id: str, challenge: str) -> bool:
+    """Third stage: Altcha proof-of-work solution verified server-side."""
+    session = sessions.get(session_id)
+    if not session or is_expired(session_id) or session['completed']:
+        return False
+    if session.get('challenge') != challenge:
+        return False
+    if not (session['game_passed'] and session['turnstile_passed']):
+        return False
+    session['altcha_passed'] = True
+    return True
+
+
+def generate_code(session_id: str) -> str | None:
+    """Finalize the session once all three stages have passed. Returns the code, or None."""
     session = sessions.get(session_id)
     if not session or is_expired(session_id):
         return None
     if session['completed']:
         return None
-    if session.get('challenge') != challenge:
-        return None
-    page_loaded_at = session.get('page_loaded_at') or 0
-    if time.time() - page_loaded_at < config.MIN_PLAY_TIME:
-        return None
-    if session['kills_registered'] < _required_interactions(session):
+    if not (session['game_passed'] and session['turnstile_passed'] and session['altcha_passed']):
         return None
     code = _generate_code()
     session['completed'] = True

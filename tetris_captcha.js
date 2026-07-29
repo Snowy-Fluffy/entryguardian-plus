@@ -445,22 +445,9 @@
         })
         .then(function (r) { return r.json(); })
         .then(function (data) {
-            if (data.code) {
-                document.querySelector('.captcha-area').style.display = 'none';
-                fb.style.display = 'none';
-                var box = document.createElement('div');
-                box.style.cssText = 'position:fixed;top:0;left:0;width:100%;height:100%;' +
-                    'background:#111;display:flex;flex-direction:column;align-items:center;' +
-                    'justify-content:center;z-index:9999;text-align:center;padding:20px;';
-                box.innerHTML =
-                    '<p style="color:#ccc;font-size:.9rem;margin-bottom:8px">&#x2705; Капча пройдена!</p>' +
-                    '<p style="color:#ccc;font-size:.9rem;margin-bottom:12px">Отправьте этот код боту:</p>' +
-                    '<div style="background:#000;border:2px solid #33ff33;padding:12px 16px;' +
-                        'font-size:2rem;font-weight:bold;letter-spacing:8px;color:#33ff33;' +
-                        'font-family:monospace;margin-bottom:10px">' + data.code + '</div>' +
-                    '<p style="color:#888;font-size:.78rem">Введите код в чате с ботом</p>';
-                document.body.appendChild(box);
-                window.parent.postMessage({ type: 'doom_complete', code: data.code }, window.location.origin);
+            if (data.ok) {
+                // The wrapper page (not this iframe) shows the result — it owns the code image.
+                window.parent.postMessage({ type: 'doom_complete', already_done: true }, window.location.origin);
             } else {
                 fb.textContent = '✗ ' + (data.error || 'Ошибка сервера') + '. Попробуйте ещё раз.';
                 fb.className = 'captcha-feedback fail';

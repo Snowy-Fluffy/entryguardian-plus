@@ -1,3 +1,6 @@
 aiogram
 aiohttp
 python-dotenv
+Pillow
+altcha
+captcha

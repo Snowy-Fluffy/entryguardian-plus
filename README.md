@@ -1,6 +1,6 @@
 # Entry Guardian
 
-Telegram anti-spam bot that gates group entry behind a interactive captcha. When a new user joins a group, the bot mutes them and sends them a link to play a short minigame. After completing the challenge the user receives an 8-character code, sends it to the bot, and gets unmuted.
+Telegram anti-spam bot that gates group entry behind a interactive captcha. When a new user joins a group, the bot mutes them and sends them a link to play a short minigame. After completing the challenge the user receives a 6-character code, sends it to the bot, and gets unmuted.
 
 The captcha type is chosen randomly from the enabled types: **DOOM** (shoot N enemies), **Tetris** (place N pieces), or **Mario** (reach the flagpole).
 
@@ -9,7 +9,10 @@ The captcha type is chosen randomly from the enabled types: **DOOM** (shoot N en
 1. A new user joins the group → bot mutes them and posts a welcome message with a button linking to the bot's DM.
 2. The user sends `/start` to the bot in DM → bot replies with a button that opens the captcha page.
 3. The user completes the minigame in the browser (one of DOOM / Tetris / Mario, chosen at random).
-4. On completion the page shows an 8-character code.
+4. Three more stages run before the code is revealed, each gating the next:
+   - **Cloudflare Turnstile** — a browser-verification widget; the token is checked server-to-server against Cloudflare's `siteverify` endpoint.
+   - **Altcha** proof-of-work — a self-hosted (`altcha-org/altcha`) widget solving a `PBKDF2/SHA-512` challenge (cost `10000`, genuinely random effort — no pre-solved/deterministic challenges), shown after a short "Ещё один момент..." message. The challenge is signed (HMAC, in-process secret) and bound to the session id so a solved payload can't be replayed against a different session.
+   - A classic distorted-text **captcha image** (`lepture/captcha`) showing the 6-character code — replaces the old "ghost font" noise-GIF approach (which turned out to be breakable by a script tracking the motion pattern between the foreground/background noise).
 5. The user sends the code to the bot → bot verifies it, unmutes the user in all pending chats, and deletes the welcome message.
 
 Sessions expire after 10 minutes. Failed code attempts are limited; too many wrong attempts result in a temporary block. A newcomer who never passes the captcha within **24 hours** is kicked from the chat (and immediately unbanned, so they can rejoin and try again). This 24h kick is on by default and can be turned off per chat from the admin panel; the welcome message tells the newcomer about the 24-hour limit only when the kick is enabled for that chat. The unban half of a kick is recorded in a persistent queue and retried (honouring rate-limit `Retry-After`) until it succeeds, so a failed/rate-limited unban — or a restart mid-kick — never leaves someone stuck banned. Re-joining within an hour of the last prompt doesn't re-post the welcome message, to avoid spam.
@@ -30,6 +33,7 @@ All types share a common server-side defense: a per-session **challenge token** 
 - Docker + Docker Compose (recommended)
 - A domain with HTTPS (nginx reverse proxy) so the captcha page is accessible from the internet
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) with **Group privacy mode disabled** and **Group member events** enabled
+- A [Cloudflare Turnstile](https://dash.cloudflare.com/?to=/:account/turnstile) widget (site key + secret key) for the browser-verification stage of the captcha
 
 ## Configuration
 
@@ -46,6 +50,14 @@ CAPTCHA_BASE_URL=https://yourdomain.com/captcha
 
 # Which captcha types to use (chosen randomly per session)
 CAPTCHA_TYPES=doom,tetris,mario
+
+# Cloudflare Turnstile keys — required, gates the stage after the minigame.
+# For local dev without a real Cloudflare-registered domain, use Cloudflare's dummy test keys
+# (always pass, work on any host including localhost):
+#   TURNSTILE_SITE_KEY=1x00000000000000000000AA
+#   TURNSTILE_SECRET_KEY=1x0000000000000000000000000000000AA
+TURNSTILE_SITE_KEY=
+TURNSTILE_SECRET_KEY=
 
 # Session lifetime
 CAPTCHA_TIMEOUT=600       # seconds (default 10 min)
@@ -191,6 +203,10 @@ location /tetris/ {
 location /mario/ {
     proxy_pass http://127.0.0.1:8080/mario/;
 }
+
+location /altcha/ {
+    proxy_pass http://127.0.0.1:8080/altcha/;
+}
 ```
 
 > **Note:** set `WEB_HOST=0.0.0.0` in `.env` — inside Docker the container's loopback is not reachable from the host.
@@ -229,6 +245,8 @@ entryguardian/
 ├── tetris_captcha.js         # Tetris game logic
 ├── mario_captcha.html        # Mario minigame page (served under /mario/)
 ├── FullScreenMario.min.js    # FullScreenMario engine (served under /mario/)
+├── altcha.js, altcha.css     # vendored Altcha widget (self-hosted, served under /altcha/)
+├── workers/pbkdf2.js         # vendored Altcha PoW worker (served under /altcha/workers/)
 ├── templates/
 │   └── captcha_wrapper.html  # outer page that hosts the game iframe
 ├── l10n/

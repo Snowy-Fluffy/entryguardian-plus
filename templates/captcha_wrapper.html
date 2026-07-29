@@ -5,6 +5,8 @@
     <title>Captcha</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
+    <link rel="stylesheet" href="/altcha/altcha.css">
     <style>
         * {
             box-sizing: border-box;
@@ -82,7 +84,7 @@
             color: #111;
         }
 
-        #result {
+        #result, #stage-turnstile, #stage-altcha {
             display: none;
             text-align: center;
             padding: 24px 32px;
@@ -91,22 +93,29 @@
             border-radius: 4px;
         }
 
-        #result p {
-            margin-bottom: 10px;
+        #result p, #stage-turnstile p, #stage-altcha p {
+            margin-bottom: 14px;
             font-size: 1rem;
             color: #ccc;
         }
 
         #code-box {
-            background: #000;
+            display: inline-block;
+            background: #0a0a0a;
             border: 2px solid #33ff33;
-            padding: 12px 24px;
-            font-size: 2.4rem;
-            font-weight: bold;
-            letter-spacing: 8px;
-            color: #33ff33;
-            margin: 12px 0;
-            font-family: 'Courier New', monospace;
+            border-radius: 10px;
+            padding: 14px 18px;
+            margin: 14px 0;
+            max-width: 100%;
+            box-shadow: 0 0 18px rgba(51, 255, 51, 0.35), inset 0 0 24px rgba(51, 255, 51, 0.06);
+        }
+
+        #code-box img {
+            display: block;
+            width: 220px;
+            max-width: 100%;
+            height: auto;
+            border-radius: 5px;
         }
 
         #hint {
@@ -126,21 +135,117 @@
     <h2>CAPTCHA</h2>
     <iframe id="frame" src="" width="__IFRAME_WIDTH__" height="__IFRAME_HEIGHT__" style="__IFRAME_STYLE__"
         scrolling="auto" frameborder="0"></iframe>
+    <div id="stage-turnstile">
+        <p>Проверка браузера...</p>
+        <div id="turnstile-widget"></div>
+    </div>
+    <div id="stage-altcha">
+        <p>Ещё один момент...</p>
+        <altcha-widget id="altcha-widget" configuration='{"hideLogo":true,"hideFooter":true}'></altcha-widget>
+    </div>
     <div id="result">
         <p>&#x2705; Капча пройдена!</p>
         <p>Отправьте этот код боту:</p>
-        <div id="code-box"></div>
+        <div id="code-box"><img id="code-img" alt="код"></div>
         <div id="hint">Введите код в чате с ботом для завершения верификации</div>
     </div>
+    <script src="/altcha/altcha.js"></script>
+    <script>
+        globalThis.$altcha.algorithms.set('PBKDF2/SHA-512', function () {
+            return new Worker('/altcha/workers/pbkdf2.js');
+        });
+    </script>
     <script>
         var uuid = '__UUID__';
         var challenge = '__CHALLENGE__';
         var iframeSrc = '__IFRAME_SRC__';
+        var turnstileSiteKey = '__TURNSTILE_SITE_KEY__';
         var done = false;
+        var turnstileWidgetId = null;
 
         document.getElementById('btn-start').addEventListener('click', function () {
             document.getElementById('intro').style.display = 'none';
             document.getElementById('frame').src = iframeSrc;
+        });
+
+        function showResult() {
+            document.getElementById('stage-altcha').style.display = 'none';
+            document.getElementById('code-img').src = '/api/captcha/' + uuid + '/code.png?t=' + Date.now();
+            document.getElementById('result').style.display = 'block';
+            document.getElementById('result').scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function renderTurnstile() {
+            turnstileWidgetId = turnstile.render('#turnstile-widget', {
+                sitekey: turnstileSiteKey,
+                theme: 'dark',
+                callback: onTurnstileSuccess,
+                'error-callback': function () {
+                    if (turnstileWidgetId !== null) turnstile.reset(turnstileWidgetId);
+                }
+            });
+        }
+
+        function showTurnstileStage() {
+            document.getElementById('frame').style.display = 'none';
+            document.getElementById('stage-turnstile').style.display = 'block';
+            document.getElementById('stage-turnstile').scrollIntoView({ behavior: 'smooth', block: 'center' });
+            if (window.turnstile) {
+                renderTurnstile();
+            } else {
+                var iv = setInterval(function () {
+                    if (window.turnstile) {
+                        clearInterval(iv);
+                        renderTurnstile();
+                    }
+                }, 100);
+            }
+        }
+
+        function onTurnstileSuccess(token) {
+            fetch('/api/captcha/' + uuid + '/verify_turnstile', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ challenge: challenge, token: token })
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.ok) {
+                        showAltchaStage();
+                    } else if (turnstileWidgetId !== null) {
+                        turnstile.reset(turnstileWidgetId);
+                    }
+                })
+                .catch(function () {
+                    if (turnstileWidgetId !== null) turnstile.reset(turnstileWidgetId);
+                });
+        }
+
+        function showAltchaStage() {
+            document.getElementById('stage-turnstile').style.display = 'none';
+            document.getElementById('stage-altcha').style.display = 'block';
+            document.getElementById('stage-altcha').scrollIntoView({ behavior: 'smooth', block: 'center' });
+            document.getElementById('altcha-widget').configure({
+                challenge: '/api/captcha/' + uuid + '/altcha_challenge?challenge=' + encodeURIComponent(challenge)
+            });
+        }
+
+        document.getElementById('altcha-widget').addEventListener('verified', function (e) {
+            var payload = e.detail && e.detail.payload;
+            if (!payload) return;
+            fetch('/api/captcha/' + uuid + '/verify_altcha', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ challenge: challenge, payload: payload })
+            })
+                .then(function (r) { return r.json(); })
+                .then(function (data) {
+                    if (data.ok) {
+                        showResult();
+                    } else {
+                        document.getElementById('altcha-widget').reset();
+                    }
+                });
         });
 
         window.addEventListener('message', function (e) {
@@ -148,17 +253,14 @@
             if (e.origin !== window.location.origin) return;
             if (!e.data) return;
 
-            // Tetris: iframe called /complete itself and put the code in the message
-            if (e.data.type === 'doom_complete' && e.data.code) {
+            // Tetris: iframe already called /complete itself and just signals it's done
+            if (e.data.type === 'doom_complete' && e.data.already_done) {
                 done = true;
-                document.getElementById('frame').style.display = 'none';
-                document.getElementById('code-box').textContent = e.data.code;
-                document.getElementById('result').style.display = 'block';
-                document.getElementById('result').scrollIntoView({ behavior: 'smooth', block: 'center' });
+                showTurnstileStage();
                 return;
             }
 
-            // Doom (type=doom_complete, no code) or Mario (event=levelComplete)
+            // Doom (type=doom_complete) or Mario (event=levelComplete)
             var isDoom = (e.data.type === 'doom_complete');
             var isMario = (e.data.event === 'levelComplete');
             if (!isDoom && !isMario) return;
@@ -171,11 +273,8 @@
             })
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
-                    if (data.code) {
-                        document.getElementById('frame').style.display = 'none';
-                        document.getElementById('code-box').textContent = data.code;
-                        document.getElementById('result').style.display = 'block';
-                        document.getElementById('result').scrollIntoView({ behavior: 'smooth', block: 'center' });
+                    if (data.ok) {
+                        showTurnstileStage();
                     }
                 });
         });
