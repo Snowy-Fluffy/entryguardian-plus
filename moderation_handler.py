@@ -42,6 +42,16 @@ _bg_tasks: set[asyncio.Task] = set()
 
 _seen_cache: dict[int, tuple] = {}
 
+_PLAIN_USER_CMD_COOLDOWN = 10
+"""Flat per-user command cooldown (seconds) for chat members with no role — moderators,
+admins and owners are exempt (permissions.is_staff). Separate from the per-command,
+admin-configurable cooldowns table (set_cooldown/get_cooldown), which only ever applied to
+moderators; this one is hardcoded and applies to everyone else instead."""
+
+_PLAIN_USER_CMD_KEY = '__any__'
+"""Pseudo-command name reusing the existing cooldown_use table for the check above — picked
+to never collide with a real command name."""
+
 
 def _spawn(coro: Awaitable[Any]) -> None:
     """Run a coroutine detached, keeping a reference until it finishes."""
@@ -97,6 +107,18 @@ class UserTrackingMiddleware(BaseMiddleware):
             cmd = text[1:].split(maxsplit=1)[0].split('@')[0].lower()
             if cmd != 'start':
                 return
+
+        if (
+            text.startswith('/')
+            and user
+            and event.chat
+            and event.chat.type in _GROUP_TYPES
+            and not permissions.is_staff(db_man, event.chat.id, user.id)
+        ):
+            remaining = db_man.cooldown_remaining(event.chat.id, user.id, _PLAIN_USER_CMD_KEY, _PLAIN_USER_CMD_COOLDOWN)
+            if remaining > 0:
+                return
+            db_man.record_cooldown_use(event.chat.id, user.id, _PLAIN_USER_CMD_KEY)
 
         if event.chat and event.chat.type in _GROUP_TYPES:
             if db_man.remember_chat(event.chat.id):
