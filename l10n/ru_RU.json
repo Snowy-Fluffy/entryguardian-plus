@@ -174,6 +174,7 @@
 	"gban_header": "🌐 Глобальные баны (всего: {0}):",
 	"gban_empty": "🌐 Глобальных банов нет",
 	"punl_first_seen": "Первое появление: {0}",
+	"uinfo_header": "👤 {0}",
 	"punl_captcha_ip": "IP: {0}",
 	"punl_captcha_ua": "User-Agent: {0}",
 	"uinfo_same_ip_header": "Другие пользователи с этим IP ({0}):",

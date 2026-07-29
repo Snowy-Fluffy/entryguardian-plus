@@ -173,6 +173,7 @@
 	"gban_header": "🌐 Global bans (total: {0}):",
 	"gban_empty": "🌐 No global bans",
 	"punl_first_seen": "First seen: {0}",
+	"uinfo_header": "👤 {0}",
 	"punl_captcha_ip": "IP: {0}",
 	"punl_captcha_ua": "User-Agent: {0}",
 	"uinfo_same_ip_header": "Other users with this IP ({0}):",

@@ -884,9 +884,10 @@ async def punishments_cmd(message: types.Message, command: CommandObject, bot: B
 
 @router.message(Command('uinfo'))
 async def uinfo_cmd(message: types.Message, command: CommandObject, bot: Bot) -> None:
-    """Owner-only, DM-only: first-seen date plus the captured IP/User-Agent
-    (config.COLLECT_CAPTCHA_IPS) — no punishment history here, that's what /punl is for.
-    Silently ignored outside a private chat (doesn't even hint the command exists)."""
+    """Owner-only, DM-only: display name/username/id (same resolution as /punl in DM) plus
+    first-seen date and the captured IP/User-Agent (config.COLLECT_CAPTCHA_IPS) — no
+    punishment history here, that's what /punl is for. Silently ignored outside a private
+    chat (doesn't even hint the command exists)."""
     if message.chat.type != 'private':
         return
     user_id = message.from_user.id
@@ -905,7 +906,9 @@ async def uinfo_cmd(message: types.Message, command: CommandObject, bot: Bot) ->
         await message.answer(translator.get_string('punl_unknown_user'))
         return
 
-    lines = [_first_seen_line(target_id)] + await _captcha_visit_lines(bot, target_id)
+    target_label = _esc(await _global_name(bot, target_id))
+    lines = [translator.get_string('uinfo_header').format(target_label), _first_seen_line(target_id)]
+    lines += await _captcha_visit_lines(bot, target_id)
     await message.answer('\n'.join(lines), parse_mode='HTML',
                          link_preview_options=types.LinkPreviewOptions(is_disabled=True))
 
