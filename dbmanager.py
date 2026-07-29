@@ -77,6 +77,10 @@ class DBManager:
 		if 'recent_channel_messages' not in tables:
 			self.cursor.execute('CREATE TABLE recent_channel_messages(chat_id INTEGER, channel_id INTEGER, message_id INTEGER, ts INTEGER)')
 			self.cursor.execute('CREATE INDEX idx_recent_channel_messages ON recent_channel_messages(chat_id, channel_id, ts)')
+		if 'join_request_chats' not in tables:
+			self.cursor.execute('CREATE TABLE join_request_chats(chat_id INTEGER PRIMARY KEY)')
+		if 'auto_accept' not in tables:
+			self.cursor.execute('CREATE TABLE auto_accept(chat_id INTEGER PRIMARY KEY)')
 		log_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(action_log)').fetchall()}
 		if 'target_id' not in log_cols:
 			self.cursor.execute('ALTER TABLE action_log ADD COLUMN target_id INTEGER')
@@ -460,6 +464,24 @@ class DBManager:
 
 	def get_raid_chats(self):
 		return [row[0] for row in self.cursor.execute('SELECT chat_id FROM raid_mode').fetchall()]
+
+	def mark_join_request_chat(self, chat_id):
+		"""Record that this chat requires join-request approval, discovered from an actual request."""
+		self.cursor.execute('INSERT OR IGNORE INTO join_request_chats(chat_id) VALUES (?)', (chat_id,))
+		self.connection.commit()
+
+	def is_join_request_chat(self, chat_id):
+		return bool(self.cursor.execute('SELECT 1 FROM join_request_chats WHERE chat_id=?', (chat_id,)).fetchone())
+
+	def set_auto_accept(self, chat_id, enabled):
+		if enabled:
+			self.cursor.execute('INSERT OR IGNORE INTO auto_accept(chat_id) VALUES (?)', (chat_id,))
+		else:
+			self.cursor.execute('DELETE FROM auto_accept WHERE chat_id=?', (chat_id,))
+		self.connection.commit()
+
+	def is_auto_accept(self, chat_id):
+		return bool(self.cursor.execute('SELECT 1 FROM auto_accept WHERE chat_id=?', (chat_id,)).fetchone())
 
 	def set_rules(self, chat_id, text):
 		if text:

@@ -17,6 +17,7 @@
 from aiogram import Router, Bot
 from aiogram.filters.chat_member_updated import ChatMemberUpdatedFilter
 from aiogram.types.chat_member_updated import ChatMemberUpdated
+from aiogram.types.chat_join_request import ChatJoinRequest
 from aiogram.types.chat_permissions import ChatPermissions
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import IS_MEMBER, IS_NOT_MEMBER
@@ -133,6 +134,42 @@ async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
     )
 
     db_man.add_pending_chat(user_id, chat_id)
+
+
+@router.chat_join_request()
+async def handle_join_request(event: ChatJoinRequest, bot: Bot) -> None:
+    """A chat that requires admin approval to join. Discovered reactively (Telegram doesn't expose
+    this setting up front) — the first request seen marks the chat so the admin panel can offer
+    the auto-accept toggle. Blocklisted users are declined and banned outright; everyone else is
+    approved only if the chat owner turned auto-accept on, then goes through the normal captcha
+    flow same as any other join (approval fires the usual chat_member IS_NOT_MEMBER>>IS_MEMBER
+    update)."""
+    user = event.from_user
+    user_id = user.id
+    chat_id = event.chat.id
+
+    db_man.remember_user(user_id, user.username, user.full_name)
+    db_man.remember_chat(chat_id)
+    db_man.mark_join_request_chat(chat_id)
+
+    if db_man.is_blocklisted(user_id) and not db_man.is_ban_exception(chat_id, user_id):
+        try:
+            await bot.decline_chat_join_request(chat_id, user_id)
+        except Exception:
+            pass
+        try:
+            await bot.ban_chat_member(chat_id, user_id)
+        except Exception:
+            pass
+        return
+
+    if not db_man.is_auto_accept(chat_id):
+        return
+
+    try:
+        await bot.approve_chat_join_request(chat_id, user_id)
+    except Exception:
+        pass
 
 
 async def raid_reminder_task(bot: Bot) -> None:

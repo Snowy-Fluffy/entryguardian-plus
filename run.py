@@ -39,7 +39,7 @@ async def main():
     dp.include_router(reaction_handler.router)
 
     await asyncio.gather(
-        dp.start_polling(bot, allowed_updates=['message', 'chat_member', 'my_chat_member', 'message_reaction', 'callback_query']),
+        dp.start_polling(bot, allowed_updates=['message', 'chat_member', 'my_chat_member', 'message_reaction', 'callback_query', 'chat_join_request']),
         webserver.start_server(),
         personal_msg_handler.session_expiry_task(bot),
         chat_member_handler.raid_reminder_task(bot),

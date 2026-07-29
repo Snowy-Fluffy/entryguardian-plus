@@ -2162,6 +2162,13 @@ async def _build_chat_menu(bot: Bot, chat_id: int, user_id: int) -> tuple[str, I
         [InlineKeyboardButton(text=translator.get_string('admin_btn_perms'), callback_data=f'adm:perm:{chat_id}')],
         [InlineKeyboardButton(text=translator.get_string('admin_btn_gbans'), callback_data=f'adm:gb:{chat_id}')],
     ]
+    if db_man.is_join_request_chat(chat_id):
+        keyboard.append([InlineKeyboardButton(
+            text=translator.get_string(
+                'admin_btn_autoaccept_on' if db_man.is_auto_accept(chat_id) else 'admin_btn_autoaccept_off'
+            ),
+            callback_data=f'adm:jreq:{chat_id}',
+        )])
     if permissions.is_owner(user_id):
         keyboard.append([InlineKeyboardButton(
             text=translator.get_string('admin_btn_start' if db_man.is_chat_stopped(chat_id) else 'admin_btn_stop'),
@@ -2435,6 +2442,13 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
         db_man.set_kick_enabled(chat_id, new_state)
         _record_log(chat_id, callback.from_user, 'log_kick',
                     translator.get_string('kick_state_on' if new_state else 'kick_state_off'))
+        text, markup = await _build_chat_menu(bot, chat_id, user_id)
+        await _edit(callback.message, text, markup)
+    elif action == 'jreq':
+        new_state = not db_man.is_auto_accept(chat_id)
+        db_man.set_auto_accept(chat_id, new_state)
+        _record_log(chat_id, callback.from_user, 'log_autoaccept',
+                    translator.get_string('autoaccept_state_on' if new_state else 'autoaccept_state_off'))
         text, markup = await _build_chat_menu(bot, chat_id, user_id)
         await _edit(callback.message, text, markup)
     elif action == 'perm':

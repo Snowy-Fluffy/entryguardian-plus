@@ -50,13 +50,20 @@ def create_session(user_id: int, captcha_type: str = 'doom') -> str:
 
 
 def set_page_loaded(session_id: str) -> str | None:
-    """Called when the captcha page is served. Generates and stores a challenge token."""
+    """Called when the captcha page is (re)served. Mints a fresh challenge and resets
+    minigame/verification progress, since the front-end always restarts the whole flow
+    from scratch on reload — a stale challenge/kill-count would otherwise get stuck."""
     session = sessions.get(session_id)
     if not session:
         return None
     challenge = secrets.token_hex(20)
     session['challenge'] = challenge
     session['page_loaded_at'] = time.time()
+    session['kills_registered'] = 0
+    session['last_kill_at'] = 0.0
+    session['game_passed'] = False
+    session['turnstile_passed'] = False
+    session['altcha_passed'] = False
     return challenge
 
 

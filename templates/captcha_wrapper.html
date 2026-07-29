@@ -160,8 +160,18 @@
         var challenge = '__CHALLENGE__';
         var iframeSrc = '__IFRAME_SRC__';
         var turnstileSiteKey = '__TURNSTILE_SITE_KEY__';
+        var turnstileEnabled = __TURNSTILE_ENABLED__;
         var done = false;
         var turnstileWidgetId = null;
+
+        function advanceAfterGame() {
+            if (turnstileEnabled) {
+                showTurnstileStage();
+            } else {
+                document.getElementById('frame').style.display = 'none';
+                showAltchaStage();
+            }
+        }
 
         document.getElementById('btn-start').addEventListener('click', function () {
             document.getElementById('intro').style.display = 'none';
@@ -256,7 +266,7 @@
             // Tetris: iframe already called /complete itself and just signals it's done
             if (e.data.type === 'doom_complete' && e.data.already_done) {
                 done = true;
-                showTurnstileStage();
+                advanceAfterGame();
                 return;
             }
 
@@ -274,7 +284,7 @@
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
                     if (data.ok) {
-                        showTurnstileStage();
+                        advanceAfterGame();
                     }
                 });
         });

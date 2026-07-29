@@ -9,8 +9,8 @@ The captcha type is chosen randomly from the enabled types: **DOOM** (shoot N en
 1. A new user joins the group → bot mutes them and posts a welcome message with a button linking to the bot's DM.
 2. The user sends `/start` to the bot in DM → bot replies with a button that opens the captcha page.
 3. The user completes the minigame in the browser (one of DOOM / Tetris / Mario, chosen at random).
-4. Three more stages run before the code is revealed, each gating the next:
-   - **Cloudflare Turnstile** — a browser-verification widget; the token is checked server-to-server against Cloudflare's `siteverify` endpoint.
+4. Up to three more stages run before the code is revealed, each gating the next:
+   - **Cloudflare Turnstile** — a browser-verification widget; the token is checked server-to-server against Cloudflare's `siteverify` endpoint. Optional: if `TURNSTILE_SITE_KEY`/`TURNSTILE_SECRET_KEY` aren't set, this stage is skipped entirely and the flow goes straight from the minigame to Altcha.
    - **Altcha** proof-of-work — a self-hosted (`altcha-org/altcha`) widget solving a `PBKDF2/SHA-512` challenge (cost `10000`, genuinely random effort — no pre-solved/deterministic challenges), shown after a short "Ещё один момент..." message. The challenge is signed (HMAC, in-process secret) and bound to the session id so a solved payload can't be replayed against a different session.
    - A classic distorted-text **captcha image** (`lepture/captcha`) showing the 6-character code — replaces the old "ghost font" noise-GIF approach (which turned out to be breakable by a script tracking the motion pattern between the foreground/background noise).
 5. The user sends the code to the bot → bot verifies it, unmutes the user in all pending chats, and deletes the welcome message.
@@ -33,7 +33,7 @@ All types share a common server-side defense: a per-session **challenge token** 
 - Docker + Docker Compose (recommended)
 - A domain with HTTPS (nginx reverse proxy) so the captcha page is accessible from the internet
 - A Telegram bot token from [@BotFather](https://t.me/BotFather) with **Group privacy mode disabled** and **Group member events** enabled
-- A [Cloudflare Turnstile](https://dash.cloudflare.com/?to=/:account/turnstile) widget (site key + secret key) for the browser-verification stage of the captcha
+- Optional: a [Cloudflare Turnstile](https://dash.cloudflare.com/?to=/:account/turnstile) widget (site key + secret key) for the browser-verification stage of the captcha — if omitted, that stage is skipped
 
 ## Configuration
 
@@ -51,7 +51,8 @@ CAPTCHA_BASE_URL=https://yourdomain.com/captcha
 # Which captcha types to use (chosen randomly per session)
 CAPTCHA_TYPES=doom,tetris,mario
 
-# Cloudflare Turnstile keys — required, gates the stage after the minigame.
+# Cloudflare Turnstile keys — optional, gates the stage after the minigame.
+# Leave both empty to skip this stage entirely.
 # For local dev without a real Cloudflare-registered domain, use Cloudflare's dummy test keys
 # (always pass, work on any host including localhost):
 #   TURNSTILE_SITE_KEY=1x00000000000000000000AA
@@ -158,6 +159,7 @@ Sent in a **private chat** with the bot, `/admin` opens an inline-button panel. 
 - toggle **"channels forbidden"** for that chat (off by default). When on, any message posted on behalf of a channel is deleted and that channel is banned, with a "Channels are forbidden in this chat" notice. A linked channel's auto-forwarded posts are left alone;
 - manage the **rights granted to users after they pass the captcha** — toggle each permission individually (send messages, send media, stickers/GIFs, polls, link previews, and *edit own tag* — the `can_edit_tag` right from Bot API 9.5, shown only if the installed aiogram supports it). Unmuting a user restores this same set. By default members get the sending rights; "edit own tag" is off until enabled. Admin-type rights (adding members, pinning, changing chat info) are never granted here.
 - view the **global ban list** — a paged, read-only list of every blocklisted user and channel (those banned via `/gban` / `/sgban`). Removal is still done with `/ungban`.
+- for chats that require **admin approval to join** (Telegram's "Approve new members" setting) — toggle **auto-accept** of join requests. This button only appears once the bot has actually seen a join request from that chat (there is no API to query the setting up front). Off by default: requests then wait for a human admin to approve/decline as usual, exactly like today. When on, the bot approves every request itself and the user goes through the normal captcha flow (mute, minigame, code) just like a regular join. Either way, a request from a **blocklisted** user is always declined and the user is banned in that chat, regardless of the toggle.
 
 Owners additionally get owner-only controls in the panel: stopping/resuming a chat (the bot ignores all commands from it), a **global command ban** — a denylist of users who are completely forbidden from using any bot command (except `/start`) and the admin panel everywhere, even if they are admins or moderators (owners can't be added) — and a **Leave chat** button (with a confirmation) that makes the bot leave that chat. Owners can also make the bot leave from inside a group with the hidden `/leavechat` command.
 
@@ -222,7 +224,7 @@ python run.py
 ## Adding the bot to a group
 
 1. Create a bot via [@BotFather](https://t.me/BotFather), get the token, set it as `TOKEN` in `.env`.
-2. Add the bot to your group and grant it **administrator** rights (restrict members, delete messages, ban members).
+2. Add the bot to your group and grant it **administrator** rights (restrict members, delete messages, ban members). If the group approves new members by request, also grant **add new members** (`can_invite_users`) — required for the bot to approve/decline join requests, needed by the auto-accept option above.
 3. Start the bot.
 
 ## Project structure

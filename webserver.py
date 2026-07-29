@@ -83,6 +83,7 @@ def _captcha_page_html(session_id: str, challenge: str, captcha_type: str) -> st
         .replace('__IFRAME_STYLE__', iframe_style)
         .replace('__CAPTCHA_DESC__', captcha_desc)
         .replace('__TURNSTILE_SITE_KEY__', config.TURNSTILE_SITE_KEY)
+        .replace('__TURNSTILE_ENABLED__', 'true' if config.TURNSTILE_ENABLED else 'false')
     )
 
 
@@ -159,6 +160,8 @@ async def handle_complete(request: web.Request) -> web.Response:
     ok = session_manager.mark_game_passed(session_id, challenge)
     if not ok:
         return web.json_response({'error': 'verification failed'}, status=403)
+    if not config.TURNSTILE_ENABLED:
+        session_manager.mark_turnstile_passed(session_id, challenge)
     return web.json_response({'ok': True})
 
 
