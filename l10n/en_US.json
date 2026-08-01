@@ -130,7 +130,7 @@
 	"raid_state_off": "off",
 	"raid_on_msg": "🛡 Anti-raid mode enabled. All new members will be banned automatically and the captcha is not shown.",
 	"raid_off_msg": "Anti-raid mode disabled.",
-	"raid_reminder": "🛡 Reminder: anti-raid is still on. Banned in the last 5 minutes: {0}",
+	"raid_reminder": "🛡 Anti-raid is on. Banned in the last 5 minutes: {0}",
 	"rules_header": "📋 Chat rules:",
 	"rules_not_set": "No rules are set for this chat.",
 	"admin_prompt_rules": "Send the chat rules text (or “-” to clear):",

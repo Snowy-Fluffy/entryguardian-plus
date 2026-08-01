@@ -38,6 +38,8 @@ _welcome_msg_by_user: dict[int, list[tuple[int, int]]] = {}
 
 _raid_bans: dict[int, int] = {}
 
+_raid_reminder_msg: dict[int, int] = {}
+
 _WELCOME_COOLDOWN = 3600
 
 _CAPTCHA_KICK_AFTER = 86400
@@ -173,14 +175,23 @@ async def handle_join_request(event: ChatJoinRequest, bot: Bot) -> None:
 
 
 async def raid_reminder_task(bot: Bot) -> None:
-    """Every 5 minutes, remind each anti-raid chat that the mode is on and how many were banned."""
+    """Every 5 minutes, remind each anti-raid chat that the mode is on and how many were banned.
+    Each reminder replaces the previous one (old one deleted first) so the chat isn't cluttered
+    with a fresh copy every 5 minutes for as long as anti-raid stays on."""
     while True:
         await asyncio.sleep(300)
         for chat_id in db_man.get_raid_chats():
             count = _raid_bans.pop(chat_id, 0)
+            old_msg_id = _raid_reminder_msg.pop(chat_id, None)
+            if old_msg_id is not None:
+                try:
+                    await bot.delete_message(chat_id, old_msg_id)
+                except Exception:
+                    pass
             try:
                 text = html.escape(translator.get_string('raid_reminder').format(count), quote=False)
-                await bot.send_message(chat_id, f'<i>{text}</i>', parse_mode='HTML')
+                sent = await bot.send_message(chat_id, f'<i>{text}</i>', parse_mode='HTML')
+                _raid_reminder_msg[chat_id] = sent.message_id
             except Exception:
                 pass
         _raid_bans.clear()
