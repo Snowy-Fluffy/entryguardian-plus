@@ -121,6 +121,13 @@ class UserTrackingMiddleware(BaseMiddleware):
             db_man.record_cooldown_use(event.chat.id, user.id, _PLAIN_USER_CMD_KEY)
 
         if event.chat and event.chat.type in _GROUP_TYPES:
+            if event.new_chat_members and db_man.is_delete_join_messages(event.chat.id):
+                try:
+                    await event.delete()
+                except Exception:
+                    pass
+                return
+
             if db_man.remember_chat(event.chat.id):
                 _spawn(_sweep_blocklist_chat(event.bot, event.chat.id))
             if event.sender_chat and event.sender_chat.type == 'channel':
@@ -2266,6 +2273,12 @@ async def _build_chat_menu(bot: Bot, chat_id: int, user_id: int) -> tuple[str, I
         )],
         [InlineKeyboardButton(
             text=translator.get_string(
+                'admin_btn_deljoin_on' if db_man.is_delete_join_messages(chat_id) else 'admin_btn_deljoin_off'
+            ),
+            callback_data=f'adm:deljoin:{chat_id}',
+        )],
+        [InlineKeyboardButton(
+            text=translator.get_string(
                 'admin_btn_autoaccept_on' if db_man.is_auto_accept(chat_id) else 'admin_btn_autoaccept_off'
             ),
             callback_data=f'adm:jreq:{chat_id}',
@@ -2546,6 +2559,13 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
         db_man.set_kick_enabled(chat_id, new_state)
         _record_log(chat_id, callback.from_user, 'log_kick',
                     translator.get_string('kick_state_on' if new_state else 'kick_state_off'))
+        text, markup = await _build_chat_menu(bot, chat_id, user_id)
+        await _edit(callback.message, text, markup)
+    elif action == 'deljoin':
+        new_state = not db_man.is_delete_join_messages(chat_id)
+        db_man.set_delete_join_messages(chat_id, new_state)
+        _record_log(chat_id, callback.from_user, 'log_deljoin',
+                    translator.get_string('deljoin_state_on' if new_state else 'deljoin_state_off'))
         text, markup = await _build_chat_menu(bot, chat_id, user_id)
         await _edit(callback.message, text, markup)
     elif action == 'jreq':

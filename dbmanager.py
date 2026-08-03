@@ -81,6 +81,8 @@ class DBManager:
 			self.cursor.execute('CREATE TABLE join_request_chats(chat_id INTEGER PRIMARY KEY)')
 		if 'auto_accept' not in tables:
 			self.cursor.execute('CREATE TABLE auto_accept(chat_id INTEGER PRIMARY KEY)')
+		if 'delete_join_messages' not in tables:
+			self.cursor.execute('CREATE TABLE delete_join_messages(chat_id INTEGER PRIMARY KEY)')
 		if 'captcha_ips' not in tables:
 			self.cursor.execute('CREATE TABLE captcha_ips(user_id INTEGER PRIMARY KEY, ip TEXT, user_agent TEXT, ts INTEGER)')
 		captcha_ip_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(captcha_ips)').fetchall()}
@@ -488,6 +490,16 @@ class DBManager:
 
 	def is_auto_accept(self, chat_id):
 		return bool(self.cursor.execute('SELECT 1 FROM auto_accept WHERE chat_id=?', (chat_id,)).fetchone())
+
+	def set_delete_join_messages(self, chat_id, enabled):
+		if enabled:
+			self.cursor.execute('INSERT OR IGNORE INTO delete_join_messages(chat_id) VALUES (?)', (chat_id,))
+		else:
+			self.cursor.execute('DELETE FROM delete_join_messages WHERE chat_id=?', (chat_id,))
+		self.connection.commit()
+
+	def is_delete_join_messages(self, chat_id):
+		return bool(self.cursor.execute('SELECT 1 FROM delete_join_messages WHERE chat_id=?', (chat_id,)).fetchone())
 
 	def record_first_captcha_visit(self, user_id, ip, user_agent, ts):
 		"""Remember the IP/User-Agent seen the first time this user opened a captcha page.
