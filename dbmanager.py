@@ -39,6 +39,8 @@ class DBManager:
 			self.cursor.execute('CREATE TABLE bot_chats(chat_id INTEGER PRIMARY KEY)')
 		if 'ban_exceptions' not in tables:
 			self.cursor.execute('CREATE TABLE ban_exceptions(chat_id INTEGER, user_id INTEGER, UNIQUE(chat_id, user_id))')
+		if 'local_bans' not in tables:
+			self.cursor.execute('CREATE TABLE local_bans(chat_id INTEGER, user_id INTEGER, UNIQUE(chat_id, user_id))')
 		if 'action_log' not in tables:
 			self.cursor.execute('CREATE TABLE action_log(id INTEGER PRIMARY KEY AUTOINCREMENT, chat_id INTEGER, ts INTEGER, text TEXT, target_id INTEGER, action_key TEXT)')
 		if 'captcha_disabled' not in tables:
@@ -81,8 +83,8 @@ class DBManager:
 			self.cursor.execute('CREATE TABLE join_request_chats(chat_id INTEGER PRIMARY KEY)')
 		if 'auto_accept' not in tables:
 			self.cursor.execute('CREATE TABLE auto_accept(chat_id INTEGER PRIMARY KEY)')
-		if 'delete_join_messages' not in tables:
-			self.cursor.execute('CREATE TABLE delete_join_messages(chat_id INTEGER PRIMARY KEY)')
+		if 'delete_system_messages' not in tables:
+			self.cursor.execute('CREATE TABLE delete_system_messages(chat_id INTEGER PRIMARY KEY)')
 		if 'captcha_ips' not in tables:
 			self.cursor.execute('CREATE TABLE captcha_ips(user_id INTEGER PRIMARY KEY, ip TEXT, user_agent TEXT, ts INTEGER)')
 		captcha_ip_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(captcha_ips)').fetchall()}
@@ -124,6 +126,14 @@ class DBManager:
 			result = self.cursor.execute('SELECT verified FROM user WHERE id=?', (user_id,)).fetchone()
 			return bool(result[0])
 		return False
+
+	def get_captcha_status(self, user_id):
+		"""(verified, blocked_until) for the captcha's own tracking of this user, or None if
+		they've never gone through it at all (no row in `user`). blocked_until is only
+		meaningful (in the future) while a temp-block from too many wrong code attempts is
+		still active; -1/past means no active block."""
+		row = self.cursor.execute('SELECT verified, blocked_until FROM user WHERE id=?', (user_id,)).fetchone()
+		return (bool(row[0]), row[1]) if row else None
 
 	def verify_user(self, user_id):
 		if not self.is_user_known(user_id):
@@ -281,6 +291,7 @@ class DBManager:
 		('roles', 'user_id'),
 		('blocklist', 'user_id'),
 		('ban_exceptions', 'user_id'),
+		('local_bans', 'user_id'),
 		('action_log', 'target_id'),
 		('pending_unbans', 'user_id'),
 		('mutes', 'user_id'),
@@ -353,6 +364,24 @@ class DBManager:
 
 	def clear_ban_exceptions(self, user_id):
 		self.cursor.execute('DELETE FROM ban_exceptions WHERE user_id=?', (user_id,))
+		self.connection.commit()
+
+	def add_local_ban(self, chat_id, user_id):
+		"""Record that a user was locally banned in this chat, so a manual/out-of-band unban
+		(done outside the bot) can be caught and reversed reactively — mirrors mutes, which
+		already had this table-backed tracking; a plain local ban previously had none."""
+		self.cursor.execute('INSERT OR IGNORE INTO local_bans(chat_id, user_id) VALUES (?, ?)', (chat_id, user_id))
+		self.connection.commit()
+
+	def remove_local_ban(self, chat_id, user_id):
+		self.cursor.execute('DELETE FROM local_bans WHERE chat_id=? AND user_id=?', (chat_id, user_id))
+		self.connection.commit()
+
+	def is_locally_banned(self, chat_id, user_id):
+		return bool(self.cursor.execute('SELECT 1 FROM local_bans WHERE chat_id=? AND user_id=?', (chat_id, user_id)).fetchone())
+
+	def clear_local_bans(self, user_id):
+		self.cursor.execute('DELETE FROM local_bans WHERE user_id=?', (user_id,))
 		self.connection.commit()
 
 	def add_channel_to_blocklist(self, channel_id):
@@ -491,15 +520,15 @@ class DBManager:
 	def is_auto_accept(self, chat_id):
 		return bool(self.cursor.execute('SELECT 1 FROM auto_accept WHERE chat_id=?', (chat_id,)).fetchone())
 
-	def set_delete_join_messages(self, chat_id, enabled):
+	def set_delete_system_messages(self, chat_id, enabled):
 		if enabled:
-			self.cursor.execute('INSERT OR IGNORE INTO delete_join_messages(chat_id) VALUES (?)', (chat_id,))
+			self.cursor.execute('INSERT OR IGNORE INTO delete_system_messages(chat_id) VALUES (?)', (chat_id,))
 		else:
-			self.cursor.execute('DELETE FROM delete_join_messages WHERE chat_id=?', (chat_id,))
+			self.cursor.execute('DELETE FROM delete_system_messages WHERE chat_id=?', (chat_id,))
 		self.connection.commit()
 
-	def is_delete_join_messages(self, chat_id):
-		return bool(self.cursor.execute('SELECT 1 FROM delete_join_messages WHERE chat_id=?', (chat_id,)).fetchone())
+	def is_delete_system_messages(self, chat_id):
+		return bool(self.cursor.execute('SELECT 1 FROM delete_system_messages WHERE chat_id=?', (chat_id,)).fetchone())
 
 	def record_first_captcha_visit(self, user_id, ip, user_agent, ts):
 		"""Remember the IP/User-Agent seen the first time this user opened a captcha page.

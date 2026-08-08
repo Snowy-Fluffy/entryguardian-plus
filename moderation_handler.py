@@ -121,7 +121,7 @@ class UserTrackingMiddleware(BaseMiddleware):
             db_man.record_cooldown_use(event.chat.id, user.id, _PLAIN_USER_CMD_KEY)
 
         if event.chat and event.chat.type in _GROUP_TYPES:
-            if event.new_chat_members and db_man.is_delete_join_messages(event.chat.id):
+            if (event.new_chat_members or event.left_chat_member) and db_man.is_delete_system_messages(event.chat.id):
                 try:
                     await event.delete()
                 except Exception:
@@ -150,6 +150,39 @@ class UserTrackingMiddleware(BaseMiddleware):
                 except Exception:
                     pass
                 return
+
+            if (
+                user
+                and not permissions.is_owner(user.id)
+                and db_man.is_locally_banned(event.chat.id, user.id)
+            ):
+                try:
+                    await event.bot.ban_chat_member(event.chat.id, user.id)
+                    _clear_captcha_state(event.chat.id, user.id)
+                except Exception:
+                    pass
+                try:
+                    await event.delete()
+                except Exception:
+                    pass
+                return
+
+            if user and not permissions.is_owner(user.id):
+                muted, until = db_man.effective_mute(event.chat.id, user.id)
+                if muted:
+                    try:
+                        await event.delete()
+                    except Exception:
+                        pass
+                    try:
+                        await event.bot.restrict_chat_member(
+                            event.chat.id, user.id,
+                            permissions=_MUTED_PERMS,
+                            until_date=until or None,
+                        )
+                    except Exception:
+                        pass
+                    return
 
             sender_chat = event.sender_chat
             if (
@@ -796,6 +829,29 @@ def _first_seen_line(target_id: int) -> str:
     return translator.get_string('punl_first_seen').format(when)
 
 
+def _global_block_line(target_id: int) -> str | None:
+    """The 'globally blocked' line shown at the top of /punl and /uinfo, if the target (user
+    or channel — ids never collide between the two) is currently on the global blocklist."""
+    if db_man.is_blocklisted(target_id) or db_man.is_channel_blocklisted(target_id):
+        return translator.get_string('punl_globally_blocked')
+    return None
+
+
+def _captcha_status_line(target_id: int) -> str:
+    """The captcha pass/fail line shown in /uinfo — separate from _first_seen_line, which
+    tracks first *observation* (any message/join), not whether the captcha was solved."""
+    status = db_man.get_captcha_status(target_id)
+    if status is None:
+        return translator.get_string('uinfo_captcha_unknown')
+    verified, blocked_until = status
+    if verified:
+        return translator.get_string('uinfo_captcha_passed')
+    if blocked_until and blocked_until > db_man.unix_time():
+        when = datetime.fromtimestamp(blocked_until).strftime('%d.%m.%Y %H:%M:%S')
+        return translator.get_string('uinfo_captcha_blocked').format(when)
+    return translator.get_string('uinfo_captcha_not_passed')
+
+
 def _ip_link(ip: str) -> str:
     """Render an IP as a clickable https://ipinfo.io/<ip> link. Falls back to plain escaped
     text if it isn't actually a well-formed IP (e.g. an old 'unknown' placeholder)."""
@@ -840,6 +896,9 @@ async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label
     instead. include_first_seen is False for channels: they're never in seen_users (only real
     users are tracked there), so 'first seen' would just be a meaningless backfilled 'now'."""
     header_lines = [_first_seen_line(target_id)] if include_first_seen else []
+    block_line = _global_block_line(target_id)
+    if block_line:
+        header_lines.append(block_line)
     rows = [r for r in rows if r[2] in _PUNISH_LOG_KEYS and r[0] in chat_ids]
     if not rows:
         empty = translator.get_string('punl_empty').format(target_label)
@@ -913,10 +972,10 @@ async def punishments_cmd(message: types.Message, command: CommandObject, bot: B
 
 @router.message(Command('uinfo'))
 async def uinfo_cmd(message: types.Message, command: CommandObject, bot: Bot) -> None:
-    """Owner-only, DM-only: display name/username/id (same resolution as /punl in DM) plus
-    first-seen date and the captured IP/User-Agent (config.COLLECT_CAPTCHA_IPS) — no
-    punishment history here, that's what /punl is for. Silently ignored outside a private
-    chat (doesn't even hint the command exists)."""
+    """Owner-only, DM-only: display name/username/id (same resolution as /punl in DM), whether
+    the captcha was passed, first-seen date, and the captured IP/User-Agent
+    (config.COLLECT_CAPTCHA_IPS) — no punishment history here, that's what /punl is for.
+    Silently ignored outside a private chat (doesn't even hint the command exists)."""
     if message.chat.type != 'private':
         return
     user_id = message.from_user.id
@@ -936,7 +995,12 @@ async def uinfo_cmd(message: types.Message, command: CommandObject, bot: Bot) ->
         return
 
     target_label = _esc(await _global_name(bot, target_id))
-    lines = [translator.get_string('uinfo_header').format(target_label), _first_seen_line(target_id)]
+    lines = [translator.get_string('uinfo_header').format(target_label)]
+    block_line = _global_block_line(target_id)
+    if block_line:
+        lines.append(block_line)
+    lines.append(_captcha_status_line(target_id))
+    lines.append(_first_seen_line(target_id))
     lines += await _captcha_visit_lines(bot, target_id)
     await message.answer('\n'.join(lines), parse_mode='HTML',
                          link_preview_options=types.LinkPreviewOptions(is_disabled=True))
@@ -1284,6 +1348,7 @@ async def ban(message: types.Message, command: CommandObject, bot: Bot) -> None:
     except Exception:
         await _ianswer(message, translator.get_string('ban_failed'))
         return
+    db_man.add_local_ban(message.chat.id, target_id)
     _clear_captcha_state(message.chat.id, target_id)
     _log_action(message, 'log_lban', banned, reason, target_id)
     await _announce_ban(message, banned_html, reason)
@@ -1334,6 +1399,7 @@ async def sban(message: types.Message, command: CommandObject, bot: Bot) -> None
         await bot.ban_chat_member(message.chat.id, target_id)
     except Exception:
         pass
+    db_man.add_local_ban(message.chat.id, target_id)
     _clear_captcha_state(message.chat.id, target_id)
     _log_action(message, 'log_slban', banned, reason, target_id)
 
@@ -1392,6 +1458,7 @@ async def unban(message: types.Message, command: CommandObject, bot: Bot) -> Non
     except Exception:
         pass
     db_man.add_ban_exception(message.chat.id, target_id)
+    db_man.remove_local_ban(message.chat.id, target_id)
     _log_action(message, 'log_unban', name, '', target_id)
 
     role_word = _actor_role_word(message.chat.id, message.from_user.id)
@@ -1418,6 +1485,7 @@ async def ungban(message: types.Message, command: CommandObject, bot: Bot) -> No
     name_html, name = await _punish_labels(bot, message, command, target_id)
     db_man.remove_from_blocklist(target_id)
     db_man.clear_ban_exceptions(target_id)
+    db_man.clear_local_bans(target_id)
     _log_global(message, 'log_ungban', name, '', target_id)
 
     source_title = message.chat.title or str(message.chat.id)
@@ -1464,6 +1532,7 @@ async def unsban(message: types.Message, command: CommandObject, bot: Bot) -> No
     except Exception:
         pass
     db_man.add_ban_exception(message.chat.id, target_id)
+    db_man.remove_local_ban(message.chat.id, target_id)
     _log_action(message, 'log_unsban', name)
 
 
@@ -1483,6 +1552,7 @@ async def unsgban(message: types.Message, command: CommandObject, bot: Bot) -> N
     name_html, name = await _punish_labels(bot, message, command, target_id)
     db_man.remove_from_blocklist(target_id)
     db_man.clear_ban_exceptions(target_id)
+    db_man.clear_local_bans(target_id)
     chat_ids = set(db_man.get_bot_chats())
     if not is_dm:
         chat_ids.add(message.chat.id)
@@ -2185,6 +2255,8 @@ _panel_state: dict[int, dict[str, Any]] = {}
 
 _log_search: dict[int, str] = {}
 
+_gban_search: dict[int, str] = {}
+
 _LOG_PAGE_SIZE = 10
 
 _ROLE_ACTIONS = {
@@ -2273,9 +2345,9 @@ async def _build_chat_menu(bot: Bot, chat_id: int, user_id: int) -> tuple[str, I
         )],
         [InlineKeyboardButton(
             text=translator.get_string(
-                'admin_btn_deljoin_on' if db_man.is_delete_join_messages(chat_id) else 'admin_btn_deljoin_off'
+                'admin_btn_delsys_on' if db_man.is_delete_system_messages(chat_id) else 'admin_btn_delsys_off'
             ),
-            callback_data=f'adm:deljoin:{chat_id}',
+            callback_data=f'adm:delsys:{chat_id}',
         )],
         [InlineKeyboardButton(
             text=translator.get_string(
@@ -2327,19 +2399,44 @@ async def _global_name(bot: Bot, user_id: int) -> str:
 _GBAN_PAGE_SIZE = 10
 
 
-async def _build_gbans_page(bot: Bot, chat_id: int, page: int) -> tuple[str, InlineKeyboardMarkup]:
-    """Read-only, paged view of the global ban list (blocklisted users and channels)."""
+async def _gban_matches(bot: Bot, kind: str, oid: int, needle: str) -> bool:
+    """Whether a blocklist entry matches a search query — id always checked locally; for
+    users the cached username/display name (seen_users, no API call) is also checked; for
+    channels (far fewer of them in practice) a live getChat lookup is used instead, since
+    there's no local title cache for channels."""
+    if needle in str(oid):
+        return True
+    if kind == 'u':
+        cached = db_man.find_user_by_id(oid)
+        if cached:
+            username, display_name = cached
+            if (username and needle in username.lower()) or (display_name and needle in display_name.lower()):
+                return True
+        return False
+    return needle in (await _entity_name(bot, oid)).lower()
+
+
+async def _build_gbans_page(bot: Bot, chat_id: int, page: int, query: str = '') -> tuple[str, InlineKeyboardMarkup]:
+    """Paged view of the global ban list (blocklisted users and channels), optionally filtered
+    by a search query (id, username or cached display name for users; id or title for
+    channels)."""
     items = [('u', uid) for uid in db_man.get_blocklist()] + \
             [('c', cid) for cid in db_man.get_channel_blocklist()]
+    if query:
+        needle = query.strip().lower().lstrip('@')
+        items = [item for item in items if await _gban_matches(bot, item[0], item[1], needle)]
+
     back = [InlineKeyboardButton(text=translator.get_string('admin_btn_back'), callback_data=f'adm:c:{chat_id}')]
     if not items:
-        return translator.get_string('gban_empty'), InlineKeyboardMarkup(inline_keyboard=[back])
+        empty = translator.get_string('gban_search_empty').format(query) if query else translator.get_string('gban_empty')
+        return empty, InlineKeyboardMarkup(inline_keyboard=[_gban_action_row(chat_id, query), back])
 
     pages = (len(items) + _GBAN_PAGE_SIZE - 1) // _GBAN_PAGE_SIZE
     page = max(0, min(page, pages - 1))
     chunk = items[page * _GBAN_PAGE_SIZE:(page + 1) * _GBAN_PAGE_SIZE]
-    lines = [translator.get_string('gban_header').format(len(items)),
-             translator.get_string('log_page_info').format(page + 1, pages, len(items)), '']
+    header = translator.get_string('gban_search_header').format(query, len(items)) if query \
+        else translator.get_string('gban_header').format(len(items))
+    lines = [header, translator.get_string('log_page_info').format(page + 1, pages, len(items)), '']
     for kind, oid in chunk:
         icon = '📢' if kind == 'c' else '👤'
         lines.append(f'{icon} {await _entity_name(bot, oid)}')
@@ -2350,7 +2447,15 @@ async def _build_gbans_page(bot: Bot, chat_id: int, page: int) -> tuple[str, Inl
     nav.append(InlineKeyboardButton(text=f'{page + 1}/{pages}', callback_data='adm:noop'))
     if page < pages - 1:
         nav.append(InlineKeyboardButton(text=translator.get_string('log_next'), callback_data=f'adm:gbpg:{chat_id}:{page + 1}'))
-    return '\n'.join(lines), InlineKeyboardMarkup(inline_keyboard=[nav, back])
+    return '\n'.join(lines), InlineKeyboardMarkup(inline_keyboard=[nav, _gban_action_row(chat_id, query), back])
+
+
+def _gban_action_row(chat_id: int, query: str) -> list[InlineKeyboardButton]:
+    """The search / clear-search button row shown under the global ban list."""
+    row = [InlineKeyboardButton(text=translator.get_string('log_search_btn'), callback_data=f'adm:gbs:{chat_id}')]
+    if query:
+        row.append(InlineKeyboardButton(text=translator.get_string('log_clear_btn'), callback_data=f'adm:gbclr:{chat_id}'))
+    return row
 
 
 async def _build_command_ban_menu(bot: Bot, chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -2528,10 +2633,23 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
         text, markup = _render_logs_page(chat_id, '', 0)
         await _edit(callback.message, text, markup)
     elif action == 'gb':
+        _panel_state.pop(user_id, None)
+        _gban_search[user_id] = ''
         text, markup = await _build_gbans_page(bot, chat_id, 0)
         await _edit(callback.message, text, markup)
     elif action == 'gbpg':
-        text, markup = await _build_gbans_page(bot, chat_id, int(parts[3]))
+        text, markup = await _build_gbans_page(bot, chat_id, int(parts[3]), _gban_search.get(user_id, ''))
+        await _edit(callback.message, text, markup)
+    elif action == 'gbs':
+        _panel_state[user_id] = {'action': 'gbansearch', 'chat_id': chat_id}
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=translator.get_string('admin_btn_cancel'), callback_data=f'adm:gb:{chat_id}')
+        ]])
+        await _edit(callback.message, translator.get_string('gban_search_prompt'), markup)
+    elif action == 'gbclr':
+        _panel_state.pop(user_id, None)
+        _gban_search[user_id] = ''
+        text, markup = await _build_gbans_page(bot, chat_id, 0)
         await _edit(callback.message, text, markup)
     elif action == 'cap':
         new_state = not db_man.is_captcha_enabled(chat_id)
@@ -2561,11 +2679,11 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
                     translator.get_string('kick_state_on' if new_state else 'kick_state_off'))
         text, markup = await _build_chat_menu(bot, chat_id, user_id)
         await _edit(callback.message, text, markup)
-    elif action == 'deljoin':
-        new_state = not db_man.is_delete_join_messages(chat_id)
-        db_man.set_delete_join_messages(chat_id, new_state)
-        _record_log(chat_id, callback.from_user, 'log_deljoin',
-                    translator.get_string('deljoin_state_on' if new_state else 'deljoin_state_off'))
+    elif action == 'delsys':
+        new_state = not db_man.is_delete_system_messages(chat_id)
+        db_man.set_delete_system_messages(chat_id, new_state)
+        _record_log(chat_id, callback.from_user, 'log_delsys',
+                    translator.get_string('delsys_state_on' if new_state else 'delsys_state_off'))
         text, markup = await _build_chat_menu(bot, chat_id, user_id)
         await _edit(callback.message, text, markup)
     elif action == 'jreq':
@@ -2737,6 +2855,14 @@ async def admin_panel_input(message: types.Message, bot: Bot) -> None:
         query = (message.text or '').strip()
         _log_search[user_id] = query
         text, markup = _render_logs_page(chat_id, query, 0)
+        await message.answer(text, reply_markup=markup)
+        return
+
+    if state['action'] == 'gbansearch':
+        _panel_state.pop(user_id, None)
+        query = (message.text or '').strip()
+        _gban_search[user_id] = query
+        text, markup = await _build_gbans_page(bot, chat_id, 0, query)
         await message.answer(text, reply_markup=markup)
         return
 
