@@ -30,6 +30,8 @@ async def on_reaction(event: MessageReactionUpdated, bot: Bot):
     if not event.user:
         return
 
+    db_man.remember_user(event.user.id, event.user.username, event.user.full_name)
+
     user_id = event.user.id
     chat_id = event.chat.id
 

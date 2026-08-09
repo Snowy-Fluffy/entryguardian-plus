@@ -138,6 +138,17 @@ async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
     db_man.add_pending_chat(user_id, chat_id)
 
 
+@router.chat_member()
+async def cache_chat_member_identity(event: ChatMemberUpdated, bot: Bot) -> None:
+    """Passive id<->username cache backfill. Registered after handle_new_user, whose narrower
+    filter (join transitions only) is matched first — aiogram stops at the first handler whose
+    filters pass, so joins stay handled exclusively there. This one only ever sees every *other*
+    chat_member update (promotions, restrictions, leaves, kicks), which still carries a full User
+    object worth caching for future @username command lookups."""
+    user = event.new_chat_member.user
+    db_man.remember_user(user.id, user.username, user.full_name)
+
+
 @router.chat_join_request()
 async def handle_join_request(event: ChatJoinRequest, bot: Bot) -> None:
     """A chat that requires admin approval to join. Discovered reactively (Telegram doesn't expose

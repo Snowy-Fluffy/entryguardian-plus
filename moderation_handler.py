@@ -20,7 +20,6 @@ import asyncio
 import html
 import ipaddress
 import re
-import aiohttp
 from aiogram import Router, types, Bot, BaseMiddleware, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
 from aiogram.filters import Command, CommandObject
@@ -419,74 +418,20 @@ def _cache_from_chat(chat) -> None:
         pass
 
 
-_USERNAME_API_URL = 'https://telecrm.xyz/api/tgkit/resolve-username'
-_APIFY_ACTOR_URL = 'https://api.apify.com/v2/acts/TrueFetch~telegram-profile/run-sync-get-dataset-items'
-
-
-def _cache_external(uid, username, first, last) -> None:
+async def _resolve_username_token(bot: Bot, username: str) -> int | None:
+    """Resolve an @username (leading '@' optional) to a user id: a live Telegram lookup first
+    (only works if the bot already has an established peer with that user — see _identity_for
+    for why a bare numeric id resolves far more reliably), falling back to the local seen_users
+    cache. No external third-party resolver — deliberately removed as unreliable/out of our
+    control; a miss here means asking the caller for the numeric id or a reply instead."""
+    token = username if username.startswith('@') else f'@{username}'
     try:
-        name = ' '.join(p for p in (first, last) if p) or None
-        db_man.remember_user(int(uid), username, name)
+        chat = await bot.get_chat(token)
+        _cache_from_chat(chat)
+        return chat.id
     except Exception:
         pass
-
-
-async def _external_primary(uname: str) -> int | None:
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=10)) as session:
-            async with session.get(_USERNAME_API_URL, params={'username': uname}) as resp:
-                if resp.status // 100 != 2:
-                    return None
-                data = await resp.json()
-        uid = data.get('id')
-        if not uid:
-            return None
-        _cache_external(uid, data.get('username'), data.get('first_name'), data.get('last_name'))
-        return int(uid)
-    except Exception:
-        return None
-
-
-async def _external_fallback(uname: str) -> int | None:
-    token = getattr(config, 'APIFY_TOKEN', '')
-    if not token:
-        return None
-    try:
-        async with aiohttp.ClientSession(timeout=aiohttp.ClientTimeout(total=45)) as session:
-            async with session.post(_APIFY_ACTOR_URL, params={'token': token},
-                                    json={'telegram_url': [f'@{uname}']}) as resp:
-                if resp.status // 100 != 2:
-                    return None
-                data = await resp.json()
-        if not isinstance(data, list) or not data:
-            return None
-        item = data[0]
-        uid = item.get('id')
-        if not uid:
-            return None
-        usernames = item.get('usernames') or []
-        _cache_external(uid, usernames[0] if usernames else None, item.get('first_name'), item.get('last_name'))
-        return int(uid)
-    except Exception:
-        return None
-
-
-async def _resolve_username_external(username: str) -> int | None:
-    mode = config.USERNAME_RESOLVE
-    if mode not in (1, 2, 3):
-        return None
-    uname = username.lstrip('@')
-    if not uname:
-        return None
-    if mode in (1, 3):
-        result = await _external_primary(uname)
-        if result is not None:
-            return result
-    if mode in (2, 3):
-        result = await _external_fallback(uname)
-        if result is not None:
-            return result
-    return None
+    return db_man.find_user_by_username(token)
 
 
 async def _resolve_target(message: types.Message, command: CommandObject, bot: Bot) -> int | None:
@@ -506,16 +451,7 @@ async def _resolve_target(message: types.Message, command: CommandObject, bot: B
         return int(arg)
 
     if arg.startswith('@'):
-        try:
-            chat = await bot.get_chat(arg)
-            _cache_from_chat(chat)
-            return chat.id
-        except Exception:
-            pass
-        cached = db_man.find_user_by_username(arg)
-        if cached is not None:
-            return cached
-        return await _resolve_username_external(arg)
+        return await _resolve_username_token(bot, arg)
 
     return None
 
@@ -665,7 +601,8 @@ async def _identity_for(bot: Bot, message: types.Message, command: CommandObject
 
     A reply / text-mention carries the identity directly; an @username was fetched live and
     cached during resolution, so it is read back from the cache; a *bare id* triggers a search
-    across every chat the bot is in (current chat first), then the cache, else unknown.
+    across every chat the bot is in (current chat first, caching a hit for future @username
+    lookups of the same person), then the cache, else unknown.
     """
     reply = message.reply_to_message
     if reply and reply.from_user and reply.from_user.id == target_id:
@@ -680,9 +617,10 @@ async def _identity_for(bot: Bot, message: types.Message, command: CommandObject
         for chat_id in chat_ids:
             try:
                 user = (await bot.get_chat_member(chat_id, target_id)).user
-                return user.full_name or '', user.username
             except Exception:
                 continue
+            db_man.remember_user(target_id, user.username, user.full_name or None)
+            return user.full_name or '', user.username
 
     cached = db_man.find_user_by_id(target_id)
     if cached:
@@ -1244,16 +1182,7 @@ async def _parse_ban(message: types.Message, command: CommandObject, bot: Bot) -
         return int(token), reason
 
     if token.startswith('@'):
-        try:
-            chat = await bot.get_chat(token)
-            _cache_from_chat(chat)
-            return chat.id, reason
-        except Exception:
-            pass
-        cached = db_man.find_user_by_username(token)
-        if cached is not None:
-            return cached, reason
-        return await _resolve_username_external(token), reason
+        return await _resolve_username_token(bot, token), reason
 
     return None, reason
 
@@ -3014,17 +2943,7 @@ async def _resolve_panel_target(message: types.Message, bot: Bot) -> int | None:
     token = text.split()[0]
     if token.lstrip('-').isdigit():
         return int(token)
-    name = token.lstrip('@')
-    try:
-        chat = await bot.get_chat('@' + name)
-        _cache_from_chat(chat)
-        return chat.id
-    except Exception:
-        pass
-    cached = db_man.find_user_by_username(name)
-    if cached is not None:
-        return cached
-    return await _resolve_username_external(name)
+    return await _resolve_username_token(bot, token)
 
 
 async def _apply_panel_role(bot: Bot, actor: types.User, chat_id: int, action: str, target_id: int) -> str:

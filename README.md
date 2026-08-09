@@ -78,11 +78,6 @@ COOL_DOWN=900             # temp block duration in seconds
 LOCALE=ru_RU
 OWNERS=                   # comma-separated Telegram user IDs of bot owners (full access in every chat)
 
-# Username resolve via EXTERNAL API (used when Telegram + the cache can't resolve a @username).
-# 0 = off, 1 = telecrm.xyz only, 2 = Apify only, 3 = both (telecrm.xyz primary, Apify fallback)
-USERNAME_RESOLVE=0
-APIFY_TOKEN=                # Apify API token, required for modes 2 and 3
-
 # Per-IP rate limit on the captcha web endpoints (/captcha/* and /api/captcha/*)
 RATE_LIMIT_MAX=40           # requests per RATE_LIMIT_WINDOW seconds, per IP
 RATE_LIMIT_WINDOW=10
@@ -151,9 +146,7 @@ The bot has a per-chat role system with three levels:
 | `/admin` | admins, owners | Open the **admin panel** in a private chat with the bot (see below) |
 | `/help` | everyone | Show the commands available **to that specific user** (regular members see the everyone-commands, moderators also see moderator commands, admins/owners see everything). The message auto-deletes after 1 minute |
 
-The target user can be specified by **replying** to their message, or by passing their numeric **ID** (`/ban 123456789`) or **@username** (`/ban @user spam`). Replying or using a numeric ID is the most reliable. An `@username` is first resolved **live** through Telegram (`getChat`) — which works for channels and public groups but **not for regular users** (the Bot API can't turn a user's @username into an id). For users, the bot falls back to its id↔username/display-name **cache** (filled from observed messages and live lookups; reassignments are tracked, and all values are bound as query parameters so a name can never inject SQL). So `@username` resolves a user only if the bot has seen them; there is a small window where a freshly-reassigned username could still point at the previous owner until the new one is seen — reply or numeric ID avoid this entirely.
-
-If even the cache misses, the bot can optionally resolve the `@username` through an **external API** — this is what `USERNAME_RESOLVE` controls: `0` off, `1` telecrm.xyz only, `2` Apify only, `3` both (telecrm.xyz first, Apify as fallback). The Apify resolver (modes 2 and 3) needs an `APIFY_TOKEN`. When all enabled resolvers fail, the command reports that the user couldn't be determined.
+The target user can be specified by **replying** to their message, or by passing their numeric **ID** (`/ban 123456789`) or **@username** (`/ban @user spam`). Replying or using a numeric ID is the most reliable. An `@username` is first resolved **live** through Telegram (`getChat`) — which works for channels and public groups but **not for regular users** (the Bot API can't turn a user's @username into an id). For users, the bot falls back to its id↔username/display-name **cache** (filled from observed messages and live lookups; reassignments are tracked, and all values are bound as query parameters so a name can never inject SQL). So `@username` resolves a user only if the bot has seen them; there is a small window where a freshly-reassigned username could still point at the previous owner until the new one is seen — reply or numeric ID avoid this entirely. There is no external/third-party fallback for a cache miss (deliberately — such services are outside the bot's control and unreliable); the command reports that the user couldn't be determined and asks for a reply or numeric ID instead.
 
 **Banning channels:** when someone posts in the group **as a channel**, a normal ban would only hit the anonymous `@Channel_Bot`. Instead, **reply** to the channel's message with `/ban` (or `/gban`, `/sban`, `/sgban`) and the bot bans the *channel sender* itself (and `/unban` … `/unsgban` reverse it). Global channel bans are remembered and re-applied in every chat the bot guards, just like user bans. Channels can't be muted (Telegram has no such action) — the bot tells you to ban instead — and can't be given a staff role.
 

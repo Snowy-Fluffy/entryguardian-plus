@@ -39,8 +39,6 @@ CAPTCHA_TYPES: list[str] = [t.strip() for t in os.getenv('CAPTCHA_TYPES', 'doom,
 TURNSTILE_SITE_KEY: str = os.getenv('TURNSTILE_SITE_KEY', '')
 TURNSTILE_SECRET_KEY: str = os.getenv('TURNSTILE_SECRET_KEY', '')
 TURNSTILE_ENABLED: bool = bool(TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY)
-USERNAME_RESOLVE: int = int(os.getenv('USERNAME_RESOLVE', '0'))
-APIFY_TOKEN: str = os.getenv('APIFY_TOKEN', '')
 
 # Per-IP rate limit on the captcha web endpoints (/captcha/* and /api/captcha/*).
 RATE_LIMIT_MAX: int = int(os.getenv('RATE_LIMIT_MAX', '40'))
