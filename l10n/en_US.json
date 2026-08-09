@@ -178,6 +178,7 @@
 	"antispam_btn_unicode_on": "🔤 Suspicious-character filter: on",
 	"antispam_btn_unicode_off": "🔤 Suspicious-character filter: off",
 	"log_antispam_unicode": "changed the suspicious-character filter",
+	"log_unicode_delete": "automatically deleted a message with suspicious characters",
 	"antispam_field_count": "Repeats before mute: {0}",
 	"antispam_field_window": "Time window: {0}",
 	"antispam_field_mute": "Mute duration: {0}",

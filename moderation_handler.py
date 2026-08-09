@@ -361,8 +361,9 @@ async def _check_antispam(event: types.Message, user: types.User | None) -> None
     staff/owners exempt.
 
     Also runs the (separately toggleable) suspicious-unicode filter first — invisible characters,
-    bidi direction-spoofing, zalgo — which just silently deletes the message with no punishment
-    and breaks any in-progress repeat streak, since it never reaches the signature check below.
+    bidi direction-spoofing, zalgo — which deletes the message (no mute/ban, just a staff-log
+    entry) and breaks any in-progress repeat streak, since it never reaches the signature check
+    below.
     """
     if not config.ANTISPAM_ENABLED:
         return
@@ -390,6 +391,9 @@ async def _check_antispam(event: types.Message, user: types.User | None) -> None
             await event.delete()
         except Exception:
             pass
+        label = _chat_info(target) if kind == 'channel' else _full_user_info(target)
+        db_man.add_log(chat_id, f'🔤 {translator.get_string("log_unicode_delete")} → {label}',
+                       target.id, 'log_unicode_delete')
         db_man.clear_antispam_streak(chat_id, target_key)
         return
 

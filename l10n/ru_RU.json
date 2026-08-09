@@ -178,6 +178,7 @@
 	"antispam_btn_unicode_on": "🔤 Фильтр спецсимволов: включён",
 	"antispam_btn_unicode_off": "🔤 Фильтр спецсимволов: выключен",
 	"log_antispam_unicode": "изменил фильтр спецсимволов",
+	"log_unicode_delete": "автоматически удалил сообщение со спецсимволами",
 	"antispam_field_count": "Повторов до мьюта: {0}",
 	"antispam_field_window": "Период: {0}",
 	"antispam_field_mute": "Длительность мьюта: {0}",

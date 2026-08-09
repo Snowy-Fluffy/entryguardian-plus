@@ -219,8 +219,9 @@ A separate per-chat toggle under the same "🚨 Антиспам" menu (on by de
 silently **deletes** messages (text or caption) containing suspicious Unicode: invisible/zero-width
 characters, bidi direction-override/embedding/isolate control characters (used to visually spoof text —
 e.g. making a malicious link or filename display as something else), or zalgo (an abnormal stack of
-combining diacritical marks on one letter). This is deletion only — no mute, no announcement, no staff DM,
-and it doesn't count toward or interact with the repeat-message threshold above beyond breaking an
+combining diacritical marks on one letter). This is deletion only — no mute, no chat announcement, no staff
+DM — just a staff action-log entry (chat's log in `/admin`) naming who it deleted the message from, and
+it doesn't count toward or interact with the repeat-message threshold above beyond breaking an
 in-progress streak (the message never survives to be compared). It's deliberately narrow: ordinary text in
 any language, including normal accented/diacritic use (Arabic, Hebrew, Vietnamese, etc.) and "fancy font"
 Unicode blocks (bold/gothic/etc. styled text), is never flagged.
