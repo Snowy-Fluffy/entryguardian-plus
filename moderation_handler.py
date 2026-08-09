@@ -184,8 +184,7 @@ class UserTrackingMiddleware(BaseMiddleware):
                         pass
                     return
 
-            if user and not event.sender_chat:
-                await _check_antispam(event, user)
+            await _check_antispam(event, user)
 
             sender_chat = event.sender_chat
             if (
@@ -252,13 +251,15 @@ def _antispam_signature(message: types.Message) -> str | None:
     return None
 
 
-async def _fire_antispam(event: types.Message, user: types.User, message_ids: list[int], settings: dict,
-                         elapsed_seconds: int) -> None:
+async def _fire_antispam(event: types.Message, kind: str, target: types.User | types.Chat,
+                         message_ids: list[int], settings: dict, elapsed_seconds: int) -> None:
     """A repeat-spam streak just crossed the threshold: delete every message but the last,
-    mute the user, announce it in the chat, log it, and (if enabled) alert staff/owners in DM
-    with the last message forwarded — same broadcast mechanism as /report. elapsed_seconds is
-    the actual time from the first of these messages to the last, for the DM's "За период" line
-    — not the configured window, which is just the cap allowed between them."""
+    punish the sender, announce it in the chat, log it, and (if enabled) alert staff/owners in
+    DM with the last message forwarded — same broadcast mechanism as /report. `kind` is 'user'
+    (target is a types.User, muted) or 'channel' (target is the sender_chat, banned instead —
+    Telegram has no way to mute a channel). elapsed_seconds is the actual time from the first of
+    these messages to the last, for the DM's "За период" line — not the configured window, which
+    is just the cap allowed between them."""
     bot = event.bot
     chat = event.chat
     for mid in message_ids[:-1]:
@@ -267,23 +268,33 @@ async def _fire_antispam(event: types.Message, user: types.User, message_ids: li
         except Exception:
             pass
 
-    until = int(datetime.now().timestamp()) + settings['mute_seconds']
-    try:
-        await bot.restrict_chat_member(chat.id, user.id, permissions=_MUTED_PERMS, until_date=until)
-        db_man.add_mute(chat.id, user.id, until)
-    except Exception:
-        pass
+    if kind == 'channel':
+        try:
+            await bot.ban_chat_sender_chat(chat.id, target.id)
+        except Exception:
+            pass
+        announce = translator.get_string('antispam_ban_announce').format(_channel_mention(target))
+        label = _chat_info(target)
+        target_id = target.id
+    else:
+        until = int(datetime.now().timestamp()) + settings['mute_seconds']
+        try:
+            await bot.restrict_chat_member(chat.id, target.id, permissions=_MUTED_PERMS, until_date=until)
+            db_man.add_mute(chat.id, target.id, until)
+        except Exception:
+            pass
+        mention = _identity_html(target.full_name or '', target.username, target.id)
+        dur_words = _seconds_to_words(settings['mute_seconds'])
+        announce = translator.get_string('antispam_mute_announce').format(mention, dur_words)
+        label = _full_user_info(target)
+        target_id = target.id
 
-    mention = _identity_html(user.full_name or '', user.username, user.id)
-    dur_words = _seconds_to_words(settings['mute_seconds'])
-    announce = translator.get_string('antispam_mute_announce').format(mention, dur_words)
     try:
         await _isend_html(bot, chat.id, announce)
     except Exception:
         pass
 
-    label = _full_user_info(user)
-    db_man.add_log(chat.id, f'🚨 {translator.get_string("log_antispam")} → {label}', user.id, 'log_antispam')
+    db_man.add_log(chat.id, f'🚨 {translator.get_string("log_antispam")} → {label}', target_id, 'log_antispam')
 
     if not settings['notify']:
         return
@@ -307,26 +318,47 @@ async def _fire_antispam(event: types.Message, user: types.User, message_ids: li
             pass
 
 
-async def _check_antispam(event: types.Message, user: types.User) -> None:
-    """Repeat-spam detection: strictly consecutive identical messages from a plain (non-staff,
-    non-owner) member within a configurable window trigger _fire_antispam once the configurable
-    threshold is reached."""
+async def _check_antispam(event: types.Message, user: types.User | None) -> None:
+    """Repeat-spam detection: strictly consecutive identical messages within a configurable
+    window trigger _fire_antispam once the configurable threshold is reached.
+
+    Three sender shapes to tell apart (see CLAUDE.md 'Channels vs anonymous admins vs users'):
+    a real channel post (sender_chat.type == 'channel') is tracked/punished by channel id — it
+    can flood a chat without being a group admin, and from_user is always the same generic
+    @Channel_Bot regardless of which channel posted, so tracking by user id would both miss it
+    and wrongly merge unrelated channels' streaks together. An anonymous group admin (sender_chat
+    set, but not a channel) and a linked channel's own auto-forwarded post are both exempt —
+    staff and non-spam respectively. Otherwise it's a plain user, tracked/punished by user id,
+    staff/owners exempt.
+    """
     if not config.ANTISPAM_ENABLED:
         return
     chat_id = event.chat.id
     settings = db_man.get_antispam_settings(chat_id)
     if not settings['enabled']:
         return
-    if permissions.is_staff(db_man, chat_id, user.id):
+
+    sender_chat = event.sender_chat
+    if sender_chat and sender_chat.type != 'channel':
+        return
+    if sender_chat and sender_chat.type == 'channel':
+        if event.is_automatic_forward:
+            return
+        kind, target, target_key = 'channel', sender_chat, sender_chat.id
+    elif user:
+        if permissions.is_staff(db_man, chat_id, user.id):
+            return
+        kind, target, target_key = 'user', user, user.id
+    else:
         return
 
     sig = _antispam_signature(event)
     if sig is None:
-        db_man.clear_antispam_streak(chat_id, user.id)
+        db_man.clear_antispam_streak(chat_id, target_key)
         return
 
     now = db_man.unix_time()
-    streak = db_man.get_antispam_streak(chat_id, user.id)
+    streak = db_man.get_antispam_streak(chat_id, target_key)
     if streak and streak['signature'] == sig and now - streak['first_ts'] <= settings['window']:
         count = streak['count'] + 1
         first_ts = streak['first_ts']
@@ -337,10 +369,10 @@ async def _check_antispam(event: types.Message, user: types.User) -> None:
         message_ids = [event.message_id]
 
     if count >= settings['count']:
-        db_man.clear_antispam_streak(chat_id, user.id)
-        await _fire_antispam(event, user, message_ids, settings, now - first_ts)
+        db_man.clear_antispam_streak(chat_id, target_key)
+        await _fire_antispam(event, kind, target, message_ids, settings, now - first_ts)
     else:
-        db_man.set_antispam_streak(chat_id, user.id, sig, count, first_ts, message_ids)
+        db_man.set_antispam_streak(chat_id, target_key, sig, count, first_ts, message_ids)
 
 
 @router.my_chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))

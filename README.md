@@ -213,6 +213,15 @@ posts an italic announcement naming them in the chat. If "notify staff" is on fo
 that chat's own admins/moderators also get a DM (same recipients/mechanism as `/report`) with the details
 and the last message forwarded to them.
 
+A message posted **as a channel** is tracked and punished separately, by the channel's own id, not lumped in
+with regular users — channels can flood a chat via "Send As" without being an admin of the group, and every
+channel post's `from_user` is the same generic `@Channel_Bot` no matter which channel posted it, so tracking
+by user id would both miss this case and wrongly merge different channels' streaks together. Since a channel
+can't be muted (no such action exists), a channel that trips the threshold is **banned** instead, with its
+own announcement wording. An **anonymous group admin** posting (`sender_chat` set, but not a channel) is
+exempt like any other staff action, and a linked channel's own auto-forwarded post into the discussion group
+is never treated as spam.
+
 > The bot can only enumerate chats it has observed *after* this version was deployed (Telegram does not expose the full list of a bot's chats). Re-adding the bot, or any message in a group, registers that chat for global bans.
 
 ## Running with Docker

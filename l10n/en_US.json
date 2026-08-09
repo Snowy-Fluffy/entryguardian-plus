@@ -192,6 +192,7 @@
 	"log_antispam_set": "changed an antispam setting",
 	"log_antispam": "auto-muted for repeated messages",
 	"antispam_mute_announce": "User {0} was automatically muted for {1} (repeated messages)",
+	"antispam_ban_announce": "Channel {0} was automatically banned (repeated messages)",
 	"antispam_alert_header": "🚨 Repeated messages",
 	"antispam_alert_count": "Message count: {0}",
 	"antispam_alert_period": "Within: {0}",
