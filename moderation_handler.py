@@ -252,10 +252,13 @@ def _antispam_signature(message: types.Message) -> str | None:
     return None
 
 
-async def _fire_antispam(event: types.Message, user: types.User, message_ids: list[int], settings: dict) -> None:
+async def _fire_antispam(event: types.Message, user: types.User, message_ids: list[int], settings: dict,
+                         elapsed_seconds: int) -> None:
     """A repeat-spam streak just crossed the threshold: delete every message but the last,
     mute the user, announce it in the chat, log it, and (if enabled) alert staff/owners in DM
-    with the last message forwarded — same broadcast mechanism as /report."""
+    with the last message forwarded — same broadcast mechanism as /report. elapsed_seconds is
+    the actual time from the first of these messages to the last, for the DM's "За период" line
+    — not the configured window, which is just the cap allowed between them."""
     bot = event.bot
     chat = event.chat
     for mid in message_ids[:-1]:
@@ -290,7 +293,7 @@ async def _fire_antispam(event: types.Message, user: types.User, message_ids: li
         translator.get_string('report_chat').format(chat.title or str(chat.id)),
         translator.get_string('report_from').format(label),
         translator.get_string('antispam_alert_count').format(len(message_ids)),
-        translator.get_string('antispam_alert_period').format(_seconds_to_words(settings['window'])),
+        translator.get_string('antispam_alert_period').format(_human_elapsed(elapsed_seconds)),
     ]
     link = _message_link(chat, message_ids[-1])
     if link:
@@ -335,7 +338,7 @@ async def _check_antispam(event: types.Message, user: types.User) -> None:
 
     if count >= settings['count']:
         db_man.clear_antispam_streak(chat_id, user.id)
-        await _fire_antispam(event, user, message_ids, settings)
+        await _fire_antispam(event, user, message_ids, settings, now - first_ts)
     else:
         db_man.set_antispam_streak(chat_id, user.id, sig, count, first_ts, message_ids)
 
@@ -2087,6 +2090,23 @@ def _seconds_to_words(seconds: int) -> str:
         if seconds and seconds % unit_seconds == 0:
             return _human_duration_words(f'{seconds // unit_seconds}{unit}')
     return _human_duration_words(f'{seconds}s')
+
+
+def _human_elapsed(seconds: int) -> str:
+    """Spelled-out elapsed time between two arbitrary timestamps, e.g. '1 час 15 минут' —
+    unlike _seconds_to_words (exact single unit, meant for admin-configured settings), this
+    shows up to the two largest non-zero units so arbitrary real-world gaps read naturally."""
+    seconds = max(0, int(seconds))
+    parts = []
+    remaining = seconds
+    for unit, unit_seconds in (('d', 86400), ('h', 3600), ('m', 60), ('s', 1)):
+        if remaining >= unit_seconds:
+            count = remaining // unit_seconds
+            remaining -= count * unit_seconds
+            parts.append(_human_duration_words(f'{count}{unit}'))
+        if len(parts) == 2:
+            break
+    return ' '.join(parts) if parts else _human_duration_words('0s')
 
 
 _COOLDOWN_COMMANDS = ['ban', 'mute', 'unmute', 'unban', 'delete', 'delete_user']
