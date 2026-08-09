@@ -175,7 +175,7 @@ Sent in a **private chat** with the bot, `/admin` opens an inline-button panel. 
 - toggle anti-raid for that chat (same effect as `/raid_on` / `/raid_off`);
 - toggle the **24-hour kick** for that chat — whether users who don't pass the captcha within 24h are kicked (on by default);
 - toggle **deletion of Telegram's system messages** for that chat (off by default) — the native "X joined the group" / "X left the group" service messages, distinct from the bot's own welcome/captcha message;
-- configure the **repeated-message antispam** for that chat: on/off (on by default), how many identical messages in a row trigger it (default 3, minimum 2), the time window they must fall within (default 6h, 1 minute–2 days), the mute duration (default 30m, minimum 1 minute), and whether to DM staff/owners when it fires (default on) — see below for what "identical" means and what happens when it triggers;
+- configure the **repeated-message antispam** for that chat: on/off (on by default), how many identical messages in a row trigger it (default 3, minimum 2), the time window they must fall within (default 6h, 1 minute–2 days), the mute duration (default 30m, minimum 1 minute), whether to DM staff/owners when it fires (default on), and a separate suspicious-Unicode message filter (default on) — see below for what "identical"/"suspicious" mean and what happens when each triggers;
 - toggle **"channels forbidden"** for that chat (off by default). When on, any message posted on behalf of a channel is deleted and that channel is banned, with a "Channels are forbidden in this chat" notice. A linked channel's auto-forwarded posts are left alone;
 - manage the **rights granted to users after they pass the captcha** — toggle each permission individually (send messages, send media, stickers/GIFs, polls, link previews, and *edit own tag* — the `can_edit_tag` right from Bot API 9.5, shown only if the installed aiogram supports it). Unmuting a user restores this same set. By default members get the sending rights; "edit own tag" is off until enabled. Admin-type rights (adding members, pinning, changing chat info) are never granted here.
 - view the **global ban list** — a paged, searchable list of every blocklisted user and channel (those banned via `/gban` / `/sgban`), same 🔍 search UI as the staff action log (by id, username, or cached display name for users; id or title for channels). Removal is still done with `/ungban`.
@@ -214,6 +214,16 @@ can't be muted (no such action exists), a channel that trips the threshold is **
 own announcement wording. An **anonymous group admin** posting (`sender_chat` set, but not a channel) is
 exempt like any other staff action, and a linked channel's own auto-forwarded post into the discussion group
 is never treated as spam.
+
+A separate per-chat toggle under the same "🚨 Антиспам" menu (on by default, also gated by `ANTISPAM_ENABLED`)
+silently **deletes** messages (text or caption) containing suspicious Unicode: invisible/zero-width
+characters, bidi direction-override/embedding/isolate control characters (used to visually spoof text —
+e.g. making a malicious link or filename display as something else), or zalgo (an abnormal stack of
+combining diacritical marks on one letter). This is deletion only — no mute, no announcement, no staff DM,
+and it doesn't count toward or interact with the repeat-message threshold above beyond breaking an
+in-progress streak (the message never survives to be compared). It's deliberately narrow: ordinary text in
+any language, including normal accented/diacritic use (Arabic, Hebrew, Vietnamese, etc.) and "fancy font"
+Unicode blocks (bold/gothic/etc. styled text), is never flagged.
 
 > The bot can only enumerate chats it has observed *after* this version was deployed (Telegram does not expose the full list of a bot's chats). Re-adding the bot, or any message in a group, registers that chat for global bans.
 

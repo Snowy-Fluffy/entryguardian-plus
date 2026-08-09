@@ -20,6 +20,7 @@ import asyncio
 import html
 import ipaddress
 import re
+import unicodedata
 from aiogram import Router, types, Bot, BaseMiddleware, F
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton, ChatPermissions
 from aiogram.filters import Command, CommandObject
@@ -230,6 +231,35 @@ class UserTrackingMiddleware(BaseMiddleware):
         return await handler(event, data)
 
 
+_ZERO_WIDTH_CHARS = frozenset('​‌‍⁠﻿᠎')
+_BIDI_CONTROL_CHARS = frozenset('‪‫‬‭‮⁦⁧⁨⁩')
+_ZALGO_MAX_STACK = 4
+
+
+def _has_suspicious_unicode(text: str) -> bool:
+    """True if text carries invisible/zero-width characters, bidi override/embedding/isolate
+    control characters (direction-spoofing, e.g. hiding a malicious file extension or link), or
+    zalgo (an abnormal stack of combining diacritical marks on one base character). Ordinary text
+    in any language — Arabic/Hebrew/Vietnamese etc. with 1-2 diacritics per letter — never
+    triggers this: LRM/RLM (U+200E/U+200F, common and legitimate in mixed bidi text) are
+    deliberately excluded from _BIDI_CONTROL_CHARS; only the actual direction-override/embedding/
+    isolate characters are treated as suspicious. 'Fancy font' unicode blocks (bold/gothic/etc.)
+    are intentionally not covered — too easy to false-positive on normal stylized text."""
+    if any(ch in _ZERO_WIDTH_CHARS for ch in text):
+        return True
+    if any(ch in _BIDI_CONTROL_CHARS for ch in text):
+        return True
+    stack = 0
+    for ch in text:
+        if unicodedata.combining(ch):
+            stack += 1
+            if stack > _ZALGO_MAX_STACK:
+                return True
+        else:
+            stack = 0
+    return False
+
+
 def _antispam_signature(message: types.Message) -> str | None:
     """A comparable signature for repeat-spam detection, or None for unsupported content types
     (polls, contacts, locations, service messages, ...) — those never count as a duplicate and
@@ -329,6 +359,10 @@ async def _check_antispam(event: types.Message, user: types.User | None) -> None
     set, but not a channel) and a linked channel's own auto-forwarded post are both exempt —
     staff and non-spam respectively. Otherwise it's a plain user, tracked/punished by user id,
     staff/owners exempt.
+
+    Also runs the (separately toggleable) suspicious-unicode filter first — invisible characters,
+    bidi direction-spoofing, zalgo — which just silently deletes the message with no punishment
+    and breaks any in-progress repeat streak, since it never reaches the signature check below.
     """
     if not config.ANTISPAM_ENABLED:
         return
@@ -349,6 +383,14 @@ async def _check_antispam(event: types.Message, user: types.User | None) -> None
             return
         kind, target, target_key = 'user', user, user.id
     else:
+        return
+
+    if settings['unicode_guard'] and _has_suspicious_unicode((event.text or '') + (event.caption or '')):
+        try:
+            await event.delete()
+        except Exception:
+            pass
+        db_man.clear_antispam_streak(chat_id, target_key)
         return
 
     sig = _antispam_signature(event)
@@ -2609,6 +2651,10 @@ def _build_antispam_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
             text=translator.get_string('antispam_btn_notify_on' if settings['notify'] else 'antispam_btn_notify_off'),
             callback_data=f'adm:aspnotify:{chat_id}',
         )],
+        [InlineKeyboardButton(
+            text=translator.get_string('antispam_btn_unicode_on' if settings['unicode_guard'] else 'antispam_btn_unicode_off'),
+            callback_data=f'adm:aspuc:{chat_id}',
+        )],
         [InlineKeyboardButton(text=translator.get_string('admin_btn_back'), callback_data=f'adm:c:{chat_id}')],
     ]
     return translator.get_string('antispam_title'), InlineKeyboardMarkup(inline_keyboard=buttons)
@@ -2900,6 +2946,13 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
         new_state = not db_man.get_antispam_settings(chat_id)['notify']
         db_man.set_antispam_field(chat_id, 'notify', new_state)
         _record_log(chat_id, callback.from_user, 'log_antispam_notify',
+                    translator.get_string('antispam_state_on' if new_state else 'antispam_state_off'))
+        text, markup = _build_antispam_menu(chat_id)
+        await _edit(callback.message, text, markup)
+    elif action == 'aspuc':
+        new_state = not db_man.get_antispam_settings(chat_id)['unicode_guard']
+        db_man.set_antispam_field(chat_id, 'unicode_guard', new_state)
+        _record_log(chat_id, callback.from_user, 'log_antispam_unicode',
                     translator.get_string('antispam_state_on' if new_state else 'antispam_state_off'))
         text, markup = _build_antispam_menu(chat_id)
         await _edit(callback.message, text, markup)

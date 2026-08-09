@@ -76,8 +76,12 @@ class DBManager:
 		if 'antispam_settings' not in tables:
 			self.cursor.execute(
 				'CREATE TABLE antispam_settings(chat_id INTEGER PRIMARY KEY, enabled INTEGER, '
-				'count INTEGER, window INTEGER, mute_seconds INTEGER, notify INTEGER)'
+				'count INTEGER, window INTEGER, mute_seconds INTEGER, notify INTEGER, '
+				'unicode_guard INTEGER DEFAULT 1)'
 			)
+		antispam_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(antispam_settings)').fetchall()}
+		if 'unicode_guard' not in antispam_cols:
+			self.cursor.execute('ALTER TABLE antispam_settings ADD COLUMN unicode_guard INTEGER DEFAULT 1')
 		if 'antispam_streak' not in tables:
 			self.cursor.execute(
 				'CREATE TABLE antispam_streak(chat_id INTEGER, user_id INTEGER, signature TEXT, '
@@ -682,27 +686,35 @@ class DBManager:
 		)
 		self.connection.commit()
 
-	_ANTISPAM_DEFAULTS = {'enabled': True, 'count': 3, 'window': 21600, 'mute_seconds': 1800, 'notify': True}
+	_ANTISPAM_DEFAULTS = {
+		'enabled': True, 'count': 3, 'window': 21600, 'mute_seconds': 1800, 'notify': True,
+		'unicode_guard': True,
+	}
 
 	def get_antispam_settings(self, chat_id):
 		row = self.cursor.execute(
-			'SELECT enabled, count, window, mute_seconds, notify FROM antispam_settings WHERE chat_id=?',
+			'SELECT enabled, count, window, mute_seconds, notify, unicode_guard '
+			'FROM antispam_settings WHERE chat_id=?',
 			(chat_id,)
 		).fetchone()
 		if row is None:
 			return dict(self._ANTISPAM_DEFAULTS)
-		return {'enabled': bool(row[0]), 'count': row[1], 'window': row[2], 'mute_seconds': row[3], 'notify': bool(row[4])}
+		return {
+			'enabled': bool(row[0]), 'count': row[1], 'window': row[2], 'mute_seconds': row[3],
+			'notify': bool(row[4]), 'unicode_guard': bool(row[5]),
+		}
 
 	def set_antispam_field(self, chat_id, field, value):
 		current = self.get_antispam_settings(chat_id)
 		current[field] = value
 		self.cursor.execute(
-			'INSERT INTO antispam_settings(chat_id, enabled, count, window, mute_seconds, notify) '
-			'VALUES (?, ?, ?, ?, ?, ?) '
+			'INSERT INTO antispam_settings(chat_id, enabled, count, window, mute_seconds, notify, unicode_guard) '
+			'VALUES (?, ?, ?, ?, ?, ?, ?) '
 			'ON CONFLICT(chat_id) DO UPDATE SET enabled=excluded.enabled, count=excluded.count, '
-			'window=excluded.window, mute_seconds=excluded.mute_seconds, notify=excluded.notify',
+			'window=excluded.window, mute_seconds=excluded.mute_seconds, notify=excluded.notify, '
+			'unicode_guard=excluded.unicode_guard',
 			(chat_id, int(current['enabled']), current['count'], current['window'],
-			 current['mute_seconds'], int(current['notify']))
+			 current['mute_seconds'], int(current['notify']), int(current['unicode_guard']))
 		)
 		self.connection.commit()
 
