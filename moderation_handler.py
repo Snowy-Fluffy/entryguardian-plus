@@ -184,6 +184,9 @@ class UserTrackingMiddleware(BaseMiddleware):
                         pass
                     return
 
+            if user and not event.sender_chat:
+                await _check_antispam(event, user)
+
             sender_chat = event.sender_chat
             if (
                 sender_chat
@@ -227,6 +230,114 @@ class UserTrackingMiddleware(BaseMiddleware):
                 if not (cmd in ('startchat', 'stopchat') and user and permissions.is_owner(user.id)):
                     return
         return await handler(event, data)
+
+
+def _antispam_signature(message: types.Message) -> str | None:
+    """A comparable signature for repeat-spam detection, or None for unsupported content types
+    (polls, contacts, locations, service messages, ...) — those never count as a duplicate and
+    always break a streak. Media is compared by file_unique_id (the same underlying file), text
+    by literal content; a caption is folded into a media signature so the same file with a
+    different caption isn't silently treated as identical."""
+    if message.text is not None:
+        text = message.text.strip()
+        return f'text:{text}' if text else None
+    for attr in ('sticker', 'animation', 'video', 'video_note', 'voice', 'document', 'audio'):
+        obj = getattr(message, attr, None)
+        if obj is not None:
+            caption = (message.caption or '').strip()
+            return f'{attr}:{obj.file_unique_id}:{caption}'
+    if message.photo:
+        caption = (message.caption or '').strip()
+        return f'photo:{message.photo[-1].file_unique_id}:{caption}'
+    return None
+
+
+async def _fire_antispam(event: types.Message, user: types.User, message_ids: list[int], settings: dict) -> None:
+    """A repeat-spam streak just crossed the threshold: delete every message but the last,
+    mute the user, announce it in the chat, log it, and (if enabled) alert staff/owners in DM
+    with the last message forwarded — same broadcast mechanism as /report."""
+    bot = event.bot
+    chat = event.chat
+    for mid in message_ids[:-1]:
+        try:
+            await bot.delete_message(chat.id, mid)
+        except Exception:
+            pass
+
+    until = int(datetime.now().timestamp()) + settings['mute_seconds']
+    try:
+        await bot.restrict_chat_member(chat.id, user.id, permissions=_MUTED_PERMS, until_date=until)
+        db_man.add_mute(chat.id, user.id, until)
+    except Exception:
+        pass
+
+    mention = _identity_html(user.full_name or '', user.username, user.id)
+    dur_words = _seconds_to_words(settings['mute_seconds'])
+    announce = translator.get_string('antispam_mute_announce').format(mention, dur_words)
+    try:
+        await _isend_html(bot, chat.id, announce)
+    except Exception:
+        pass
+
+    label = _full_user_info(user)
+    db_man.add_log(chat.id, f'🚨 {translator.get_string("log_antispam")} → {label}', user.id, 'log_antispam')
+
+    if not settings['notify']:
+        return
+    lines = [
+        translator.get_string('antispam_alert_header'),
+        translator.get_string('report_time').format(datetime.now().strftime('%d.%m.%Y %H:%M:%S')),
+        translator.get_string('report_chat').format(chat.title or str(chat.id)),
+        translator.get_string('report_from').format(label),
+        translator.get_string('antispam_alert_count').format(len(message_ids)),
+        translator.get_string('antispam_alert_period').format(_seconds_to_words(settings['window'])),
+    ]
+    link = _message_link(chat, message_ids[-1])
+    if link:
+        lines.append(translator.get_string('antispam_alert_link').format(link))
+    notice = '\n'.join(lines)
+    for uid in _report_recipients(chat.id, 0):
+        try:
+            await bot.send_message(uid, notice)
+            await bot.forward_message(uid, chat.id, message_ids[-1])
+        except Exception:
+            pass
+
+
+async def _check_antispam(event: types.Message, user: types.User) -> None:
+    """Repeat-spam detection: strictly consecutive identical messages from a plain (non-staff,
+    non-owner) member within a configurable window trigger _fire_antispam once the configurable
+    threshold is reached."""
+    if not config.ANTISPAM_ENABLED:
+        return
+    chat_id = event.chat.id
+    settings = db_man.get_antispam_settings(chat_id)
+    if not settings['enabled']:
+        return
+    if permissions.is_staff(db_man, chat_id, user.id):
+        return
+
+    sig = _antispam_signature(event)
+    if sig is None:
+        db_man.clear_antispam_streak(chat_id, user.id)
+        return
+
+    now = db_man.unix_time()
+    streak = db_man.get_antispam_streak(chat_id, user.id)
+    if streak and streak['signature'] == sig and now - streak['first_ts'] <= settings['window']:
+        count = streak['count'] + 1
+        first_ts = streak['first_ts']
+        message_ids = streak['message_ids'] + [event.message_id]
+    else:
+        count = 1
+        first_ts = now
+        message_ids = [event.message_id]
+
+    if count >= settings['count']:
+        db_man.clear_antispam_streak(chat_id, user.id)
+        await _fire_antispam(event, user, message_ids, settings)
+    else:
+        db_man.set_antispam_streak(chat_id, user.id, sig, count, first_ts, message_ids)
 
 
 @router.my_chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
@@ -1966,6 +2077,18 @@ def _human_duration_words(token: str) -> str:
     return f'{count} {word}'
 
 
+def _seconds_to_words(seconds: int) -> str:
+    """Spelled-out words for a raw seconds value (e.g. from an admin-panel numeric setting),
+    picking the largest unit that divides it evenly. _human_duration_words only accepts a single
+    token like `5h`, and _human_time can emit multi-part strings like `1h 30m` that don't
+    round-trip through it — this always works because such values were themselves parsed from a
+    token via _parse_duration in the first place."""
+    for unit, unit_seconds in (('mo', 2592000), ('w', 604800), ('d', 86400), ('h', 3600), ('m', 60)):
+        if seconds and seconds % unit_seconds == 0:
+            return _human_duration_words(f'{seconds // unit_seconds}{unit}')
+    return _human_duration_words(f'{seconds}s')
+
+
 _COOLDOWN_COMMANDS = ['ban', 'mute', 'unmute', 'unban', 'delete', 'delete_user']
 
 
@@ -2349,6 +2472,7 @@ async def _build_chat_menu(bot: Bot, chat_id: int, user_id: int) -> tuple[str, I
             ),
             callback_data=f'adm:delsys:{chat_id}',
         )],
+        [InlineKeyboardButton(text=translator.get_string('admin_btn_antispam'), callback_data=f'adm:asp:{chat_id}')],
         [InlineKeyboardButton(
             text=translator.get_string(
                 'admin_btn_autoaccept_on' if db_man.is_auto_accept(chat_id) else 'admin_btn_autoaccept_off'
@@ -2477,6 +2601,36 @@ def _build_cooldown_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
         buttons.append([InlineKeyboardButton(text=f'/{cmd} — {value}', callback_data=f'adm:cdset:{chat_id}:{cmd}')])
     buttons.append([InlineKeyboardButton(text=translator.get_string('admin_btn_back'), callback_data=f'adm:c:{chat_id}')])
     return translator.get_string('cooldown_title'), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _build_antispam_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Per-chat repeated-message antispam settings: on/off, repeat threshold, time window, mute
+    duration, and whether to DM staff — same sub-menu shape as _build_cooldown_menu."""
+    settings = db_man.get_antispam_settings(chat_id)
+    buttons = [
+        [InlineKeyboardButton(
+            text=translator.get_string('antispam_btn_on' if settings['enabled'] else 'antispam_btn_off'),
+            callback_data=f'adm:asptog:{chat_id}',
+        )],
+        [InlineKeyboardButton(
+            text=translator.get_string('antispam_field_count').format(settings['count']),
+            callback_data=f'adm:aspset:{chat_id}:count',
+        )],
+        [InlineKeyboardButton(
+            text=translator.get_string('antispam_field_window').format(_human_time(settings['window'])),
+            callback_data=f'adm:aspset:{chat_id}:window',
+        )],
+        [InlineKeyboardButton(
+            text=translator.get_string('antispam_field_mute').format(_human_time(settings['mute_seconds'])),
+            callback_data=f'adm:aspset:{chat_id}:mute',
+        )],
+        [InlineKeyboardButton(
+            text=translator.get_string('antispam_btn_notify_on' if settings['notify'] else 'antispam_btn_notify_off'),
+            callback_data=f'adm:aspnotify:{chat_id}',
+        )],
+        [InlineKeyboardButton(text=translator.get_string('admin_btn_back'), callback_data=f'adm:c:{chat_id}')],
+    ]
+    return translator.get_string('antispam_title'), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def _perm_supported(key: str) -> bool:
@@ -2750,6 +2904,31 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
             InlineKeyboardButton(text=translator.get_string('admin_btn_cancel'), callback_data=f'adm:cd:{chat_id}')
         ]])
         await _edit(callback.message, translator.get_string('admin_prompt_cooldown').format(cmd), markup)
+    elif action == 'asp':
+        _panel_state.pop(user_id, None)
+        text, markup = _build_antispam_menu(chat_id)
+        await _edit(callback.message, text, markup)
+    elif action == 'asptog':
+        new_state = not db_man.get_antispam_settings(chat_id)['enabled']
+        db_man.set_antispam_field(chat_id, 'enabled', new_state)
+        _record_log(chat_id, callback.from_user, 'log_antispam_toggle',
+                    translator.get_string('antispam_state_on' if new_state else 'antispam_state_off'))
+        text, markup = _build_antispam_menu(chat_id)
+        await _edit(callback.message, text, markup)
+    elif action == 'aspnotify':
+        new_state = not db_man.get_antispam_settings(chat_id)['notify']
+        db_man.set_antispam_field(chat_id, 'notify', new_state)
+        _record_log(chat_id, callback.from_user, 'log_antispam_notify',
+                    translator.get_string('antispam_state_on' if new_state else 'antispam_state_off'))
+        text, markup = _build_antispam_menu(chat_id)
+        await _edit(callback.message, text, markup)
+    elif action == 'aspset':
+        field = parts[3]
+        _panel_state[user_id] = {'action': 'antispam', 'chat_id': chat_id, 'field': field}
+        markup = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(text=translator.get_string('admin_btn_cancel'), callback_data=f'adm:asp:{chat_id}')
+        ]])
+        await _edit(callback.message, translator.get_string(f'antispam_prompt_{field}'), markup)
     elif action in ('cb', 'cbadd', 'cbdel'):
         if not permissions.is_owner(user_id):
             await callback.answer(translator.get_string('admin_no_access'), show_alert=True)
@@ -2918,6 +3097,35 @@ async def admin_panel_input(message: types.Message, bot: Bot) -> None:
         _record_log(chat_id, message.from_user, 'log_cooldown', f'/{cmd} = {value}')
         await message.answer(translator.get_string('cooldown_set').format(cmd))
         text, markup = _build_cooldown_menu(chat_id)
+        await message.answer(text, reply_markup=markup)
+        return
+
+    if state['action'] == 'antispam':
+        field = state['field']
+        raw = (message.text or '').strip().lower()
+        if field == 'count':
+            if not raw.isdigit() or int(raw) < 2:
+                await message.answer(translator.get_string('antispam_bad_count'))
+                return
+            value = int(raw)
+        elif field == 'window':
+            seconds = _parse_duration(raw)
+            if seconds is None or not (60 <= seconds <= 172800):
+                await message.answer(translator.get_string('antispam_bad_window'))
+                return
+            value = seconds
+        else:
+            seconds = _parse_duration(raw)
+            if seconds is None or seconds < 60:
+                await message.answer(translator.get_string('antispam_bad_mute'))
+                return
+            value = seconds
+        _panel_state.pop(user_id, None)
+        db_field = {'count': 'count', 'window': 'window', 'mute': 'mute_seconds'}[field]
+        db_man.set_antispam_field(chat_id, db_field, value)
+        _record_log(chat_id, message.from_user, 'log_antispam_set', f'{field} = {value}')
+        await message.answer(translator.get_string('antispam_set'))
+        text, markup = _build_antispam_menu(chat_id)
         await message.answer(text, reply_markup=markup)
         return
 

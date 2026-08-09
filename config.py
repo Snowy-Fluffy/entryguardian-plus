@@ -56,3 +56,8 @@ TRUST_PROXY_HEADERS: bool = os.getenv('TRUST_PROXY_HEADERS', '1').strip().lower(
 # Optional: remember the IP address a user solved the captcha from (shown in /punl).
 # Off by default — enabling this stores personal data (IP addresses), so it's opt-in.
 COLLECT_CAPTCHA_IPS: bool = os.getenv('COLLECT_CAPTCHA_IPS', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
+# Repeated-message antispam: mutes a user who posts the same content N times in a row within a
+# time window (configurable per chat via /admin). On by default. This requires the bot to look
+# at the content/media id of every message to detect duplicates — turn off if that's a concern.
+ANTISPAM_ENABLED: bool = os.getenv('ANTISPAM_ENABLED', '1').strip().lower() in ('1', 'true', 'yes', 'on')

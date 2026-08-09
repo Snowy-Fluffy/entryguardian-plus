@@ -96,6 +96,12 @@ TRUST_PROXY_HEADERS=1
 # Optional: remember the IP + User-Agent seen the FIRST time a user opens their captcha page,
 # shown in /punl. Off by default (stores personal data) — see "Moderation" below.
 COLLECT_CAPTCHA_IPS=0
+
+# Repeated-message antispam (deletes+mutes a user who posts the same content N times in a row
+# within a time window). On by default. Per-chat thresholds are set via /admin — this only gates
+# whether the feature exists at all; requires inspecting every message's content/media id to
+# detect duplicates, so turn off if that's a privacy concern. See "Moderation" below.
+ANTISPAM_ENABLED=1
 ```
 
 ## Moderation
@@ -176,6 +182,7 @@ Sent in a **private chat** with the bot, `/admin` opens an inline-button panel. 
 - toggle anti-raid for that chat (same effect as `/raid_on` / `/raid_off`);
 - toggle the **24-hour kick** for that chat — whether users who don't pass the captcha within 24h are kicked (on by default);
 - toggle **deletion of Telegram's system messages** for that chat (off by default) — the native "X joined the group" / "X left the group" service messages, distinct from the bot's own welcome/captcha message;
+- configure the **repeated-message antispam** for that chat: on/off (on by default), how many identical messages in a row trigger it (default 3, minimum 2), the time window they must fall within (default 6h, 1 minute–2 days), the mute duration (default 30m, minimum 1 minute), and whether to DM staff/owners when it fires (default on) — see below for what "identical" means and what happens when it triggers;
 - toggle **"channels forbidden"** for that chat (off by default). When on, any message posted on behalf of a channel is deleted and that channel is banned, with a "Channels are forbidden in this chat" notice. A linked channel's auto-forwarded posts are left alone;
 - manage the **rights granted to users after they pass the captcha** — toggle each permission individually (send messages, send media, stickers/GIFs, polls, link previews, and *edit own tag* — the `can_edit_tag` right from Bot API 9.5, shown only if the installed aiogram supports it). Unmuting a user restores this same set. By default members get the sending rights; "edit own tag" is off until enabled. Admin-type rights (adding members, pinning, changing chat info) are never granted here.
 - view the **global ban list** — a paged, searchable list of every blocklisted user and channel (those banned via `/gban` / `/sgban`), same 🔍 search UI as the staff action log (by id, username, or cached display name for users; id or title for channels). Removal is still done with `/ungban`.
@@ -194,6 +201,17 @@ As a safety net, a blocklisted user who somehow slips through is still banned as
 The same kind of safety net applies to mutes: if a muted user's Telegram-level restriction is ever lifted outside the bot (an admin manually unmuting them from Telegram's own UI, a failed `restrict_chat_member` call, etc.) while the bot's own mute record (local or global) hasn't expired yet, the next message they send is deleted and their mute is silently re-applied up to the originally recorded expiry — the bot's mute record is the source of truth, not whatever Telegram's restriction currently says.
 
 `/ban`/`/sban` (**local** ban) get the same treatment: the bot records the ban in a `local_bans` table when it's issued, and if the user is ever manually unbanned in Telegram directly (bypassing `/unban`/`/unsban`) and somehow still manages to send a message, it's deleted and they're banned again on the spot. `/unban`/`/unsban` clear that record (as does a global unban, everywhere at once); a plain global ban (`/gban`/`/sgban`) doesn't need this — it's already covered by the existing blocklist safety net described above.
+
+**Repeated-message antispam** (`ANTISPAM_ENABLED` in `.env`, on/off and thresholds per chat via `/admin` —
+see above): watches every plain member's (never staff's or an owner's) messages for **strictly consecutive**
+duplicates — any other message from them in between resets the count. "Identical" means literally the same
+text, or the same underlying file for a sticker/GIF/photo/video/video note/voice message/document/audio
+(compared by file id, not by re-uploading/hashing); a caption counts too, so the same photo with a different
+caption isn't treated as a repeat. Once the configured count is reached within the configured window, the
+bot deletes every one of those messages except the last, mutes the user for the configured duration, and
+posts an italic announcement naming them in the chat. If "notify staff" is on for that chat, every owner and
+that chat's own admins/moderators also get a DM (same recipients/mechanism as `/report`) with the details
+and the last message forwarded to them.
 
 > The bot can only enumerate chats it has observed *after* this version was deployed (Telegram does not expose the full list of a bot's chats). Re-adding the bot, or any message in a group, registers that chat for global bans.
 
