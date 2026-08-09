@@ -299,9 +299,9 @@ entryguardian/
 ├── personal_msg_handler.py   # /start and code verification in bot DM
 ├── chat_member_handler.py    # new member detection, mute, welcome message
 ├── reaction_handler.py       # reaction events
-├── moderation_handler.py     # role commands + auto-admin on bot join
+├── moderation_handler/       # roles, bans/mutes, anti-raid, deletion, admin panel (package, split by command family)
 ├── permissions.py            # role/permission helpers (owner, admin, moderator)
-├── dbmanager.py              # SQLite: verified users, pending chats, roles
+├── dbmanager/                # SQLite: verified users, pending chats, roles, ... (package, one DBManager class via mixins)
 ├── translator.py             # locale string loader
 ├── captcha.html              # DOOM minigame page (served under /doom/)
 ├── tetris_captcha.html       # Tetris minigame page (served under /tetris/)

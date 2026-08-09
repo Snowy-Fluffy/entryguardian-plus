@@ -41,11 +41,16 @@ single `asyncio.gather`: Telegram long-polling, the aiohttp captcha web server (
 infinite-loop background tasks (session expiry, raid reminders, 24h-kick sweep, pending-unban retries, message-log
 flush/purge). All of this is **one process** — there's no worker/queue split. Every module-level `db_man = DBManager()`
 in each handler file opens its own `sqlite3` connection (`check_same_thread=False`) to the same file; this is
-intentional and matches the existing pattern, not a bug to "fix" into a shared singleton.
+intentional and matches the existing pattern, not a bug to "fix" into a shared singleton. `moderation_handler` is a
+package (see below) but still only opens one connection — its `db_man` lives in `moderation_handler/common.py` and
+every submodule imports that same instance, rather than each submodule opening its own.
 
 Routers register in `run.py`: `moderation_handler.router`, `personal_msg_handler.router`, `chat_member_handler.router`,
 `reaction_handler.router`. `moderation_handler.UserTrackingMiddleware` is installed as an **outer** middleware on
-`dp.message`, so it runs before *every* message hits *any* router (see below).
+`dp.message`, so it runs before *every* message hits *any* router (see below). Both `moderation_handler` and
+`dbmanager` are packages, not single files — `import moderation_handler` / `import dbmanager` still works exactly as
+before because each package's `__init__.py` re-exports the same names `run.py` and the other handler files import;
+nothing outside these two packages needed to change.
 
 ## The captcha verification pipeline (multi-file, easy to break silently)
 
@@ -80,7 +85,21 @@ not the visitor's) gated by `config.TRUST_PROXY_HEADERS`. If `COLLECT_CAPTCHA_IP
 seen for a user is recorded once (`captcha_ips` table, `INSERT OR IGNORE` — never overwritten) and surfaced only via
 the owner-only, DM-only `/uinfo` command, deliberately kept out of `/punl` (which staff/admins can also reach).
 
-## Moderation system (`moderation_handler.py`, ~2800 lines — the biggest file by far)
+## Moderation system (`moderation_handler/` package)
+
+Split by command family, since the old single file grew to ~3200 lines: `common.py` holds the shared `router`,
+`db_man`, and every helper used by more than one submodule (target resolution, identity/mention rendering, duration
+parsing, cooldown guard, `build_chat_permissions`, ...) — it's the only submodule the others import from, keeping
+the import graph a star with no cycles. `middleware.py` is `UserTrackingMiddleware` plus the antispam
+detection it drives and the bot-added/promoted/removed handlers. `roles.py`, `reports.py` (`/report`, `/punl`,
+`/uinfo`), `bans.py`, `mutes.py`, `deletion.py`, and `chat_admin.py` (raid mode, rules, stop/start/leave chat) each
+own one command family. `admin_panel.py` is the `/admin` command plus the whole `adm:*` callback dispatcher — still
+the largest submodule (~750 lines) since it's one coherent subsystem. `__init__.py` imports every submodule (so
+their `@router.message`/`@router.callback_query` decorators register as an import side effect) and re-exports the
+handful of names `run.py`/`personal_msg_handler.py` touch: `router`, `UserTrackingMiddleware`,
+`flush_messages_task`, `purge_old_messages_task`, `build_chat_permissions`. Adding a new command means picking the
+right submodule by family (or `common.py` if the helper is genuinely shared) — don't reach for a new top-level file
+per command.
 
 Three-tier role model in `permissions.py`: **owner** (in `config.OWNERS`, global, not stored in DB) > **admin**
 (per-chat, `roles` table) > **moderator** (per-chat). Almost every command has 4 variants: local/global ×
@@ -111,19 +130,23 @@ reserved pseudo-command key (`__any__`) in the existing `cooldown_use` table —
 per-command cooldowns (`cooldowns` table, `/admin` panel → per-command cooldown menu), which only ever throttle
 *moderators*, not plain members. Finally it enforces `stopped_chats` (owner-only `/stopchat`).
 
-The admin panel (`/admin`, DM-only) is a single `F.data.startswith('adm:')` callback-query handler
-(`admin_callback`) dispatching on an `action` token parsed out of `adm:<action>:<chat_id>[:...]` — if you add a new
-toggle, follow the existing pattern of a button in `_build_chat_menu` plus a branch in that dispatcher, not a new
-handler.
+The admin panel (`/admin`, DM-only, `moderation_handler/admin_panel.py`) is a single `F.data.startswith('adm:')`
+callback-query handler (`admin_callback`) dispatching on an `action` token parsed out of `adm:<action>:<chat_id>[:...]`
+— if you add a new toggle, follow the existing pattern of a button in `_build_chat_menu` plus a branch in that
+dispatcher, not a new handler.
 
-## Database (`dbmanager.py`)
+## Database (`dbmanager/` package)
 
-Single SQLite file, one `DBManager` class, no ORM. Schema migration is inline in `__init__`: every table is
-`CREATE TABLE IF NOT EXISTS`-style (checked against `sqlite_master`), and columns added after initial release are
-added via `PRAGMA table_info` + conditional `ALTER TABLE ... ADD COLUMN` — **this is the only migration mechanism**;
-there are no numbered migration files. Follow that pattern for schema changes (see the `captcha_ips`/`user_agent`
-column addition for a recent example). All queries are parameterized (`?` placeholders) — never string-format a
-value into SQL.
+Single SQLite file, one `DBManager` class, no ORM — the class itself is not split, only the *file*: `DBManager`
+(defined in `dbmanager/__init__.py`) is composed from per-domain mixins, each in its own file (`users.py`,
+`roles.py`, `bans.py`, `mutes.py`, `chat_settings.py`, `antispam.py`, `logs.py`, `message_log.py`) — every mixin
+method still just uses `self.cursor`/`self.connection`, set up once by `DBManager.__init__`. Schema migration stays
+entirely in that one `__init__`: every table is `CREATE TABLE IF NOT EXISTS`-style (checked against
+`sqlite_master`), and columns added after initial release are added via `PRAGMA table_info` + conditional
+`ALTER TABLE ... ADD COLUMN` — **this is the only migration mechanism**; there are no numbered migration files.
+Follow that pattern for schema changes (see the `captcha_ips`/`user_agent` column addition for a recent example),
+and add new methods to whichever mixin file matches their domain, not to `__init__.py`. All queries are
+parameterized (`?` placeholders) — never string-format a value into SQL.
 
 Global vs. local state is a real distinction, not just naming: `blocklist`/`global_mutes` apply across every chat
 the bot is in (`db_man.get_bot_chats()`), while `mutes`/per-chat ban state apply to one chat only. `effective_mute()`
@@ -142,6 +165,7 @@ comma or missed bracket breaks the whole locale silently loud (`json.load` raise
 `Translator.__init__`).
 
 HTML output discipline: most staff-facing messages are sent with `parse_mode='HTML'`. Any interpolated
-user-controlled text (names, titles, reasons, User-Agent, etc.) must go through `_esc()` (in `moderation_handler.py`,
-`html.escape(..., quote=False)`) before being embedded — several helpers (`_channel_mention`, `_user_mention`,
-`_identity_html`) already do this for you; don't bypass them by hand-building an HTML string from raw fields.
+user-controlled text (names, titles, reasons, User-Agent, etc.) must go through `_esc()` (in
+`moderation_handler/common.py`, `html.escape(..., quote=False)`) before being embedded — several helpers
+(`_channel_mention`, `_user_mention`, `_identity_html`) already do this for you; don't bypass them by hand-building
+an HTML string from raw fields.
