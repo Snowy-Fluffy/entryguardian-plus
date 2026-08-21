@@ -127,6 +127,12 @@ def _ip_link(ip: str) -> str:
     return f'<a href="https://ipinfo.io/{escaped}">{escaped}</a>'
 
 
+def _gban_mark(user_id: int) -> str:
+    """Suffix appended after a rendered user name in the /uinfo and /iptop same-IP lists when
+    that user is currently on the global blocklist; empty string otherwise."""
+    return translator.get_string('ip_user_gban_mark') if db_man.is_blocklisted(user_id) else ''
+
+
 async def _captcha_visit_lines(bot: Bot, target_id: int) -> list[str]:
     """The 'IP:'/'User-Agent:'/same-IP lines shown in /uinfo below 'First seen:', if the
     opt-in IP collection is on and a first-visit record exists. Each field is shown
@@ -149,7 +155,7 @@ async def _captcha_visit_lines(bot: Bot, target_id: int) -> list[str]:
         if others:
             lines.append(translator.get_string('uinfo_same_ip_header').format(len(others)))
             for uid in others:
-                lines.append(_esc(await _global_name(bot, uid)))
+                lines.append(_esc(await _global_name(bot, uid)) + _gban_mark(uid))
     return lines
 
 
@@ -295,8 +301,12 @@ def _build_iptop_page(user_id: int, sort: str, page: int) -> tuple[str, InlineKe
              translator.get_string('log_page_info').format(page + 1, pages, len(rows))]
 
     keyboard = []
-    for idx, (ip, cnt, _last_ts) in enumerate(chunk):
-        label = translator.get_string('iptop_row_btn').format(ip, cnt)
+    for idx, (ip, cnt, last_ts) in enumerate(chunk):
+        if sort == 'recent':
+            when = datetime.fromtimestamp(last_ts).strftime('%d.%m.%Y %H:%M:%S')
+            label = translator.get_string('iptop_row_btn_recent').format(ip, cnt, when)
+        else:
+            label = translator.get_string('iptop_row_btn').format(ip, cnt)
         keyboard.append([InlineKeyboardButton(text=label, callback_data=f'ipt:v:{idx}:{sort}:{page}')])
 
     nav = []
@@ -331,7 +341,7 @@ async def _build_iptop_detail(bot: Bot, ip: str, sort: str, page: int) -> tuple[
     lines = [translator.get_string('iptop_detail_header').format(_ip_link(ip), len(users)), '']
     for uid, user_agent, ts in users:
         when = datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M:%S')
-        name = _esc(await _global_name(bot, uid))
+        name = _esc(await _global_name(bot, uid)) + _gban_mark(uid)
         lines.append(translator.get_string('iptop_detail_row').format(name, when))
         if user_agent:
             lines.append(translator.get_string('punl_captcha_ua').format(_esc(user_agent)))
