@@ -16,8 +16,9 @@
 
 from datetime import datetime
 import ipaddress
-from aiogram import types, Bot
+from aiogram import types, Bot, F
 from aiogram.filters import Command, CommandObject
+from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
 import permissions
 import config
 from .common import (
@@ -267,3 +268,141 @@ async def uinfo_cmd(message: types.Message, command: CommandObject, bot: Bot) ->
     lines += await _captcha_visit_lines(bot, target_id)
     await message.answer('\n'.join(lines), parse_mode='HTML',
                          link_preview_options=types.LinkPreviewOptions(is_disabled=True))
+
+
+_IPTOP_PAGE_SIZE = 10
+
+_iptop_page_ips: dict[int, list[str]] = {}
+
+
+def _build_iptop_page(user_id: int, sort: str, page: int) -> tuple[str, InlineKeyboardMarkup | None]:
+    """Render one page of the /iptop matched-IP list; caches the page's IPs in
+    _iptop_page_ips[user_id] so the drill-down callback can resolve a button's index back to
+    its IP without embedding the (potentially long, IPv6) IP string in callback_data."""
+    sort = sort if sort in ('cnt', 'recent') else 'cnt'
+    rows = db_man.get_matched_ip_groups(order_by=sort)
+    if not rows:
+        _iptop_page_ips.pop(user_id, None)
+        return translator.get_string('iptop_empty'), None
+
+    pages = (len(rows) + _IPTOP_PAGE_SIZE - 1) // _IPTOP_PAGE_SIZE
+    page = max(0, min(page, pages - 1))
+    chunk = rows[page * _IPTOP_PAGE_SIZE:(page + 1) * _IPTOP_PAGE_SIZE]
+    _iptop_page_ips[user_id] = [ip for ip, _cnt, _last_ts in chunk]
+
+    header_key = 'iptop_header_cnt' if sort == 'cnt' else 'iptop_header_recent'
+    lines = [translator.get_string(header_key).format(len(rows)),
+             translator.get_string('log_page_info').format(page + 1, pages, len(rows))]
+
+    keyboard = []
+    for idx, (ip, cnt, _last_ts) in enumerate(chunk):
+        label = translator.get_string('iptop_row_btn').format(ip, cnt)
+        keyboard.append([InlineKeyboardButton(text=label, callback_data=f'ipt:v:{idx}:{sort}:{page}')])
+
+    nav = []
+    if page > 0:
+        nav.append(InlineKeyboardButton(text=translator.get_string('log_prev'),
+                                        callback_data=f'ipt:pg:{sort}:{page - 1}'))
+    nav.append(InlineKeyboardButton(text=f'{page + 1}/{pages}', callback_data='ipt:noop'))
+    if page < pages - 1:
+        nav.append(InlineKeyboardButton(text=translator.get_string('log_next'),
+                                        callback_data=f'ipt:pg:{sort}:{page + 1}'))
+    keyboard.append(nav)
+
+    other_sort = 'recent' if sort == 'cnt' else 'cnt'
+    sort_key = 'iptop_sort_recent_btn' if sort == 'cnt' else 'iptop_sort_cnt_btn'
+    keyboard.append([InlineKeyboardButton(text=translator.get_string(sort_key),
+                                          callback_data=f'ipt:pg:{other_sort}:0')])
+
+    return '\n'.join(lines), InlineKeyboardMarkup(inline_keyboard=keyboard)
+
+
+async def _build_iptop_detail(bot: Bot, ip: str, sort: str, page: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Drill-down: every user sharing `ip`'s first-captcha-visit record, most recent first.
+    Reuses the same rendering pieces /uinfo already uses for IP/name/UA (_ip_link, _esc,
+    _global_name, the punl_captcha_ua key) so the two commands look consistent."""
+    users = db_man.get_users_by_ip_with_details(ip)
+    back_btn = InlineKeyboardButton(text=translator.get_string('admin_btn_back'),
+                                    callback_data=f'ipt:pg:{sort}:{page}')
+    if not users:
+        return (translator.get_string('iptop_detail_empty').format(_ip_link(ip)),
+                InlineKeyboardMarkup(inline_keyboard=[[back_btn]]))
+
+    lines = [translator.get_string('iptop_detail_header').format(_ip_link(ip), len(users)), '']
+    for uid, user_agent, ts in users:
+        when = datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M:%S')
+        name = _esc(await _global_name(bot, uid))
+        lines.append(translator.get_string('iptop_detail_row').format(name, when))
+        if user_agent:
+            lines.append(translator.get_string('punl_captcha_ua').format(_esc(user_agent)))
+    out = '\n'.join(lines)
+    if len(out) > 4000:
+        out = out[:3999] + '…'
+    return out, InlineKeyboardMarkup(inline_keyboard=[[back_btn]])
+
+
+async def _iptop_edit(message: types.Message, text: str, markup: InlineKeyboardMarkup | None) -> None:
+    """Best-effort edit-in-place for /iptop's inline nav -- not imported from admin_panel.py's
+    own _edit, since reports.py only imports from .common (admin_panel.py is a sibling
+    submodule, not common.py, per the package's star import-graph rule)."""
+    try:
+        await message.edit_text(text, reply_markup=markup, parse_mode='HTML',
+                                link_preview_options=types.LinkPreviewOptions(is_disabled=True))
+    except Exception:
+        pass
+
+
+@router.message(Command('iptop'))
+async def iptop_cmd(message: types.Message, bot: Bot) -> None:
+    """Owner-only, DM-only: list every first-captcha-visit IP shared by 2+ distinct users (a
+    ban-evasion / multi-accounting signal). Paginated; buttons toggle sort order (user count
+    vs. most-recent match) and drill into the list of users behind any IP. Silently ignored
+    outside a private chat, matching /uinfo's posture -- IP data is sensitive."""
+    if message.chat.type != 'private':
+        return
+    user_id = message.from_user.id
+    if not permissions.is_owner(user_id):
+        await message.answer(translator.get_string('mod_no_permission'))
+        return
+
+    text, markup = _build_iptop_page(user_id, 'cnt', 0)
+    await message.answer(text, reply_markup=markup, parse_mode='HTML',
+                         link_preview_options=types.LinkPreviewOptions(is_disabled=True))
+
+
+@router.callback_query(F.data.startswith('ipt:'))
+async def iptop_callback(callback: types.CallbackQuery, bot: Bot) -> None:
+    user_id = callback.from_user.id
+    if not permissions.is_owner(user_id):
+        await callback.answer(translator.get_string('mod_no_permission'), show_alert=True)
+        return
+
+    parts = callback.data.split(':')
+    action = parts[1]
+
+    if action == 'noop':
+        await callback.answer()
+        return
+
+    if action == 'pg':
+        sort = parts[2] if parts[2] in ('cnt', 'recent') else 'cnt'
+        page = int(parts[3])
+        text, markup = _build_iptop_page(user_id, sort, page)
+        await _iptop_edit(callback.message, text, markup)
+        await callback.answer()
+        return
+
+    if action == 'v':
+        idx = int(parts[2])
+        sort = parts[3] if parts[3] in ('cnt', 'recent') else 'cnt'
+        page = int(parts[4])
+        ips = _iptop_page_ips.get(user_id)
+        if not ips or idx >= len(ips):
+            await callback.answer(translator.get_string('iptop_stale'), show_alert=True)
+            return
+        text, markup = await _build_iptop_detail(bot, ips[idx], sort, page)
+        await _iptop_edit(callback.message, text, markup)
+        await callback.answer()
+        return
+
+    await callback.answer()

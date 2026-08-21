@@ -190,3 +190,24 @@ class UsersMixin:
 		return [row[0] for row in self.cursor.execute(
 			'SELECT user_id FROM captcha_ips WHERE ip=?', (ip,)
 		).fetchall()]
+
+	def get_matched_ip_groups(self, order_by='cnt'):
+		"""Every first-captcha-visit IP shared by 2+ distinct users. order_by='cnt' sorts by group
+		size desc (ties by most recent); order_by='recent' sorts by most recent visit in the group
+		desc (ties by size). Excludes '' / 'unknown' (the _client_ip() fallback placeholder) so a
+		proxy misconfiguration funneling many users onto 'unknown' doesn't look like a real match."""
+		order_sql = 'cnt DESC, last_ts DESC' if order_by == 'cnt' else 'last_ts DESC, cnt DESC'
+		# order_sql is one of two hardcoded literals chosen in Python -- never built from caller
+		# input -- so this stays within the "always parameterize" rule; ip/threshold use `?`.
+		return self.cursor.execute(
+			f'SELECT ip, COUNT(*) AS cnt, MAX(ts) AS last_ts FROM captcha_ips '
+			f"WHERE ip IS NOT NULL AND ip <> '' AND ip <> 'unknown' "
+			f'GROUP BY ip HAVING COUNT(*) >= 2 ORDER BY {order_sql}'
+		).fetchall()
+
+	def get_users_by_ip_with_details(self, ip):
+		"""user_id, user_agent, ts for every user sharing this first-captcha-visit ip, most recent
+		first -- feeds /iptop's drill-down view."""
+		return self.cursor.execute(
+			'SELECT user_id, user_agent, ts FROM captcha_ips WHERE ip=? ORDER BY ts DESC', (ip,)
+		).fetchall()
