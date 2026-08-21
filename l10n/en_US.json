@@ -228,6 +228,7 @@
 	"iptop_header_recent": "🔎 Matched IPs — sorted by most recent match ({0} total)",
 	"iptop_row_btn": "{0} • {1} 👤",
 	"iptop_row_btn_recent": "{0} • {1} 👤 • {2}",
+	"iptop_row_gban_mark": "⛔ ",
 	"iptop_sort_recent_btn": "🕐 By recency",
 	"iptop_sort_cnt_btn": "🔢 By count",
 	"iptop_empty": "No matched IPs — no first-captcha-visit IP is currently shared by 2 or more users.",

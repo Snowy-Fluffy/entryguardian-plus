@@ -228,6 +228,7 @@
 	"iptop_header_recent": "🔎 Совпадающие IP — по недавности совпадения (всего: {0})",
 	"iptop_row_btn": "{0} • {1} 👤",
 	"iptop_row_btn_recent": "{0} • {1} 👤 • {2}",
+	"iptop_row_gban_mark": "⛔ ",
 	"iptop_sort_recent_btn": "🕐 По недавности",
 	"iptop_sort_cnt_btn": "🔢 По количеству",
 	"iptop_empty": "Совпадающих IP не найдено — ни один IP первого захода на капчу пока не используют 2+ пользователей.",

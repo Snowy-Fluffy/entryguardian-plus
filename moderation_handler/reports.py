@@ -294,19 +294,20 @@ def _build_iptop_page(user_id: int, sort: str, page: int) -> tuple[str, InlineKe
     pages = (len(rows) + _IPTOP_PAGE_SIZE - 1) // _IPTOP_PAGE_SIZE
     page = max(0, min(page, pages - 1))
     chunk = rows[page * _IPTOP_PAGE_SIZE:(page + 1) * _IPTOP_PAGE_SIZE]
-    _iptop_page_ips[user_id] = [ip for ip, _cnt, _last_ts in chunk]
+    _iptop_page_ips[user_id] = [ip for ip, _cnt, _last_ts, _has_banned in chunk]
 
     header_key = 'iptop_header_cnt' if sort == 'cnt' else 'iptop_header_recent'
     lines = [translator.get_string(header_key).format(len(rows)),
              translator.get_string('log_page_info').format(page + 1, pages, len(rows))]
 
     keyboard = []
-    for idx, (ip, cnt, last_ts) in enumerate(chunk):
+    for idx, (ip, cnt, last_ts, has_banned) in enumerate(chunk):
+        mark = translator.get_string('iptop_row_gban_mark') if has_banned else ''
         if sort == 'recent':
             when = datetime.fromtimestamp(last_ts).strftime('%d.%m.%Y %H:%M:%S')
-            label = translator.get_string('iptop_row_btn_recent').format(ip, cnt, when)
+            label = mark + translator.get_string('iptop_row_btn_recent').format(ip, cnt, when)
         else:
-            label = translator.get_string('iptop_row_btn').format(ip, cnt)
+            label = mark + translator.get_string('iptop_row_btn').format(ip, cnt)
         keyboard.append([InlineKeyboardButton(text=label, callback_data=f'ipt:v:{idx}:{sort}:{page}')])
 
     nav = []

@@ -192,17 +192,22 @@ class UsersMixin:
 		).fetchall()]
 
 	def get_matched_ip_groups(self, order_by='cnt'):
-		"""Every first-captcha-visit IP shared by 2+ distinct users. order_by='cnt' sorts by group
-		size desc (ties by most recent); order_by='recent' sorts by most recent visit in the group
-		desc (ties by size). Excludes '' / 'unknown' (the _client_ip() fallback placeholder) so a
-		proxy misconfiguration funneling many users onto 'unknown' doesn't look like a real match."""
+		"""Every first-captcha-visit IP shared by 2+ distinct users, also flagging whether any of
+		those users is currently on the global blocklist (has_banned, 1/0) -- computed via a
+		LEFT JOIN so /iptop's list view doesn't need a per-row follow-up query. order_by='cnt'
+		sorts by group size desc (ties by most recent); order_by='recent' sorts by most recent
+		visit in the group desc (ties by size). Excludes '' / 'unknown' (the _client_ip() fallback
+		placeholder) so a proxy misconfiguration funneling many users onto 'unknown' doesn't look
+		like a real match."""
 		order_sql = 'cnt DESC, last_ts DESC' if order_by == 'cnt' else 'last_ts DESC, cnt DESC'
 		# order_sql is one of two hardcoded literals chosen in Python -- never built from caller
 		# input -- so this stays within the "always parameterize" rule; ip/threshold use `?`.
 		return self.cursor.execute(
-			f'SELECT ip, COUNT(*) AS cnt, MAX(ts) AS last_ts FROM captcha_ips '
-			f"WHERE ip IS NOT NULL AND ip <> '' AND ip <> 'unknown' "
-			f'GROUP BY ip HAVING COUNT(*) >= 2 ORDER BY {order_sql}'
+			f'SELECT ci.ip, COUNT(*) AS cnt, MAX(ci.ts) AS last_ts, '
+			f'MAX(CASE WHEN bl.user_id IS NOT NULL THEN 1 ELSE 0 END) AS has_banned '
+			f'FROM captcha_ips ci LEFT JOIN blocklist bl ON bl.user_id = ci.user_id '
+			f"WHERE ci.ip IS NOT NULL AND ci.ip <> '' AND ci.ip <> 'unknown' "
+			f'GROUP BY ci.ip HAVING COUNT(*) >= 2 ORDER BY {order_sql}'
 		).fetchall()
 
 	def get_users_by_ip_with_details(self, ip):
