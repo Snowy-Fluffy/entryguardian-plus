@@ -101,6 +101,21 @@ def _global_block_line(target_id: int) -> str | None:
     return None
 
 
+def _global_mute_line(target_id: int) -> str | None:
+    """The 'globally muted' line shown at the top of /punl and /uinfo, if the target is
+    currently globally muted. is_globally_muted() already accounts for expiry (lazily clears
+    expired rows), so this never reports a stale mute. Channels are never muted (mutes are a
+    per-account concept), so this is safe to call unconditionally for a channel target_id too
+    -- it will simply find no row."""
+    if not db_man.is_globally_muted(target_id):
+        return None
+    until = db_man.get_global_mute_until(target_id)
+    if until:
+        when = datetime.fromtimestamp(until).strftime('%d.%m.%Y %H:%M:%S')
+        return translator.get_string('punl_globally_muted_until').format(when)
+    return translator.get_string('punl_globally_muted')
+
+
 def _captcha_status_line(target_id: int) -> str:
     """The captcha pass/fail line shown in /uinfo — separate from _first_seen_line, which
     tracks first *observation* (any message/join), not whether the captcha was solved."""
@@ -133,6 +148,12 @@ def _gban_mark(user_id: int) -> str:
     return translator.get_string('ip_user_gban_mark') if db_man.is_blocklisted(user_id) else ''
 
 
+def _gmute_mark(user_id: int) -> str:
+    """Suffix appended after a rendered user name in the /uinfo and /iptop same-IP lists when
+    that user is currently globally muted; empty string otherwise."""
+    return translator.get_string('ip_user_gmute_mark') if db_man.is_globally_muted(user_id) else ''
+
+
 async def _captcha_visit_lines(bot: Bot, target_id: int) -> list[str]:
     """The 'IP:'/'User-Agent:'/same-IP lines shown in /uinfo below 'First seen:', if the
     opt-in IP collection is on and a first-visit record exists. Each field is shown
@@ -155,7 +176,7 @@ async def _captcha_visit_lines(bot: Bot, target_id: int) -> list[str]:
         if others:
             lines.append(translator.get_string('uinfo_same_ip_header').format(len(others)))
             for uid in others:
-                lines.append(_esc(await _global_name(bot, uid)) + _gban_mark(uid))
+                lines.append(_esc(await _global_name(bot, uid)) + _gban_mark(uid) + _gmute_mark(uid))
     return lines
 
 
@@ -169,6 +190,9 @@ async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label
     block_line = _global_block_line(target_id)
     if block_line:
         header_lines.append(block_line)
+    mute_line = _global_mute_line(target_id)
+    if mute_line:
+        header_lines.append(mute_line)
     rows = [r for r in rows if r[2] in _PUNISH_LOG_KEYS and r[0] in chat_ids]
     if not rows:
         empty = translator.get_string('punl_empty').format(target_label)
@@ -269,6 +293,9 @@ async def uinfo_cmd(message: types.Message, command: CommandObject, bot: Bot) ->
     block_line = _global_block_line(target_id)
     if block_line:
         lines.append(block_line)
+    mute_line = _global_mute_line(target_id)
+    if mute_line:
+        lines.append(mute_line)
     lines.append(_captcha_status_line(target_id))
     lines.append(_first_seen_line(target_id))
     lines += await _captcha_visit_lines(bot, target_id)
@@ -294,15 +321,16 @@ def _build_iptop_page(user_id: int, sort: str, page: int) -> tuple[str, InlineKe
     pages = (len(rows) + _IPTOP_PAGE_SIZE - 1) // _IPTOP_PAGE_SIZE
     page = max(0, min(page, pages - 1))
     chunk = rows[page * _IPTOP_PAGE_SIZE:(page + 1) * _IPTOP_PAGE_SIZE]
-    _iptop_page_ips[user_id] = [ip for ip, _cnt, _last_ts, _has_banned in chunk]
+    _iptop_page_ips[user_id] = [ip for ip, _cnt, _last_ts, _has_banned, _has_muted in chunk]
 
     header_key = 'iptop_header_cnt' if sort == 'cnt' else 'iptop_header_recent'
     lines = [translator.get_string(header_key).format(len(rows)),
              translator.get_string('log_page_info').format(page + 1, pages, len(rows))]
 
     keyboard = []
-    for idx, (ip, cnt, last_ts, has_banned) in enumerate(chunk):
+    for idx, (ip, cnt, last_ts, has_banned, has_muted) in enumerate(chunk):
         mark = translator.get_string('iptop_row_gban_mark') if has_banned else ''
+        mark += translator.get_string('iptop_row_gmute_mark') if has_muted else ''
         if sort == 'recent':
             when = datetime.fromtimestamp(last_ts).strftime('%d.%m.%Y %H:%M:%S')
             label = mark + translator.get_string('iptop_row_btn_recent').format(ip, cnt, when)
@@ -342,7 +370,7 @@ async def _build_iptop_detail(bot: Bot, ip: str, sort: str, page: int) -> tuple[
     lines = [translator.get_string('iptop_detail_header').format(_ip_link(ip), len(users)), '']
     for uid, user_agent, ts in users:
         when = datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M:%S')
-        name = _esc(await _global_name(bot, uid)) + _gban_mark(uid)
+        name = _esc(await _global_name(bot, uid)) + _gban_mark(uid) + _gmute_mark(uid)
         lines.append(translator.get_string('iptop_detail_row').format(name, when))
         if user_agent:
             lines.append(translator.get_string('punl_captcha_ua').format(_esc(user_agent)))

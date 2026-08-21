@@ -193,19 +193,26 @@ class UsersMixin:
 
 	def get_matched_ip_groups(self, order_by='cnt'):
 		"""Every first-captcha-visit IP shared by 2+ distinct users, also flagging whether any of
-		those users is currently on the global blocklist (has_banned, 1/0) -- computed via a
-		LEFT JOIN so /iptop's list view doesn't need a per-row follow-up query. order_by='cnt'
-		sorts by group size desc (ties by most recent); order_by='recent' sorts by most recent
-		visit in the group desc (ties by size). Excludes '' / 'unknown' (the _client_ip() fallback
-		placeholder) so a proxy misconfiguration funneling many users onto 'unknown' doesn't look
-		like a real match."""
+		those users is currently on the global blocklist (has_banned, 1/0) or globally muted
+		(has_muted, 1/0) -- both computed via LEFT JOINs so /iptop's list view doesn't need
+		per-row follow-up queries. The global_mutes join's expiry check lives in the ON clause
+		(not WHERE) so it stays a LEFT JOIN -- an expiry check in WHERE would silently turn it
+		into an INNER JOIN and drop unmuted users' rows out of the GROUP BY entirely.
+		order_by='cnt' sorts by group size desc (ties by most recent); order_by='recent' sorts by
+		most recent visit in the group desc (ties by size). Excludes '' / 'unknown' (the
+		_client_ip() fallback placeholder) so a proxy misconfiguration funneling many users onto
+		'unknown' doesn't look like a real match."""
 		order_sql = 'cnt DESC, last_ts DESC' if order_by == 'cnt' else 'last_ts DESC, cnt DESC'
 		# order_sql is one of two hardcoded literals chosen in Python -- never built from caller
 		# input -- so this stays within the "always parameterize" rule; ip/threshold use `?`.
 		return self.cursor.execute(
 			f'SELECT ci.ip, COUNT(*) AS cnt, MAX(ci.ts) AS last_ts, '
-			f'MAX(CASE WHEN bl.user_id IS NOT NULL THEN 1 ELSE 0 END) AS has_banned '
-			f'FROM captcha_ips ci LEFT JOIN blocklist bl ON bl.user_id = ci.user_id '
+			f'MAX(CASE WHEN bl.user_id IS NOT NULL THEN 1 ELSE 0 END) AS has_banned, '
+			f'MAX(CASE WHEN gm.user_id IS NOT NULL THEN 1 ELSE 0 END) AS has_muted '
+			f'FROM captcha_ips ci '
+			f'LEFT JOIN blocklist bl ON bl.user_id = ci.user_id '
+			f"LEFT JOIN global_mutes gm ON gm.user_id = ci.user_id "
+			f"AND (gm.until = 0 OR gm.until > strftime('%s','now')) "
 			f"WHERE ci.ip IS NOT NULL AND ci.ip <> '' AND ci.ip <> 'unknown' "
 			f'GROUP BY ci.ip HAVING COUNT(*) >= 2 ORDER BY {order_sql}'
 		).fetchall()
