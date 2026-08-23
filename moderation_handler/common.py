@@ -493,6 +493,18 @@ async def _chat_title(bot: Bot, chat_id: int) -> str:
         return str(chat_id)
 
 
+async def _chat_title_or_none(bot: Bot, chat_id: int) -> str | None:
+    """Like _chat_title, but returns None instead of falling back to the numeric id string when
+    the chat can't be resolved (bot no longer a member, chat deleted, etc.) -- lets /punl tell a
+    genuinely known chat title apart from an unresolvable one, so it can omit the '[chat]'
+    prefix instead of showing a meaningless bare number."""
+    try:
+        chat = await bot.get_chat(chat_id)
+        return chat.title or None
+    except Exception:
+        return None
+
+
 def _accessible_chats(user_id: int) -> list[int]:
     if permissions.is_owner(user_id):
         return db_man.get_bot_chats()

@@ -25,7 +25,7 @@ from .common import (
     router, db_man, translator, _GROUP_TYPES,
     _delete_silently, _ianswer, _esc, _full_user_info, _chat_info, _message_link,
     _report_recipients, _reply_channel, _channel_mention, _resolve_target, _deny,
-    _display_name_html, _global_name, _accessible_chats, _chat_title,
+    _display_name_html, _global_name, _accessible_chats, _chat_title_or_none,
 )
 
 
@@ -181,11 +181,14 @@ async def _captcha_visit_lines(bot: Bot, target_id: int) -> list[str]:
 
 
 async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label: str,
-                              chat_ids: set[int], show_chat: bool, *, include_first_seen: bool = True) -> str:
+                              chat_ids: set[int], *, include_first_seen: bool = True) -> str:
     """Render a user's/channel's punishment history from get_punishments() rows, scoped to
-    chat_ids. Never includes IP/User-Agent — that's owner-only, DM-only, shown by /uinfo
-    instead. include_first_seen is False for channels: they're never in seen_users (only real
-    users are tracked there), so 'first seen' would just be a meaningless backfilled 'now'."""
+    chat_ids. Each line shows the chat the action happened in, when resolvable (cached per
+    chat_id in `titles` to avoid repeat bot.get_chat calls within one render); an unresolvable
+    chat falls back to a plain '{when} | {text}' line. Never includes IP/User-Agent — that's
+    owner-only, DM-only, shown by /uinfo instead. include_first_seen is False for channels:
+    they're never in seen_users (only real users are tracked there), so 'first seen' would just
+    be a meaningless backfilled 'now'."""
     header_lines = [_first_seen_line(target_id)] if include_first_seen else []
     block_line = _global_block_line(target_id)
     if block_line:
@@ -198,14 +201,15 @@ async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label
         empty = translator.get_string('punl_empty').format(target_label)
         return ('\n'.join(header_lines) + '\n' + empty) if header_lines else empty
     lines = header_lines + [translator.get_string('punl_header').format(target_label, len(rows))]
-    titles: dict[int, str] = {}
+    titles: dict[int, str | None] = {}
     for chat_id, ts, _action_key, text in rows[:_PUNL_MAX]:
         when = datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M:%S')
         text = _esc(text)
-        if show_chat:
-            if chat_id not in titles:
-                titles[chat_id] = _esc(await _chat_title(bot, chat_id))
-            lines.append(f'{when} | [{titles[chat_id]}] {text}')
+        if chat_id not in titles:
+            titles[chat_id] = await _chat_title_or_none(bot, chat_id)
+        title = titles[chat_id]
+        if title:
+            lines.append(f'{when} | [{_esc(title)}] {text}')
         else:
             lines.append(f'{when} | {text}')
     if len(rows) > _PUNL_MAX:
@@ -227,12 +231,12 @@ async def punishments_cmd(message: types.Message, command: CommandObject, bot: B
         if not permissions.is_staff(db_man, message.chat.id, user_id):
             await _deny(message)
             return
-        chat_ids, show_chat = {message.chat.id}, False
+        chat_ids = {message.chat.id}
     else:
         if not (permissions.is_owner(user_id) or db_man.get_admin_chats(user_id)):
             await message.answer(translator.get_string('mod_no_permission'))
             return
-        chat_ids, show_chat = set(_accessible_chats(user_id)), True
+        chat_ids = set(_accessible_chats(user_id))
 
     channel = _reply_channel(message)
     if channel is not None:
@@ -259,7 +263,7 @@ async def punishments_cmd(message: types.Message, command: CommandObject, bot: B
         return
 
     rows = db_man.get_punishments(target_id)
-    text = await _render_punishments(bot, rows, target_id, target_label, chat_ids, show_chat,
+    text = await _render_punishments(bot, rows, target_id, target_label, chat_ids,
                                      include_first_seen=include_first_seen)
     await message.answer(text, parse_mode='HTML', link_preview_options=types.LinkPreviewOptions(is_disabled=True))
 
