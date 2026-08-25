@@ -100,7 +100,7 @@ async def _maybe_channel_ban(message: types.Message, command: CommandObject, bot
             await bot.ban_chat_sender_chat(chat_id, channel.id)
         except Exception:
             pass
-        if not silent:
+        if not silent and (not glob or db_man.is_gpunish_announce_enabled(chat_id)):
             try:
                 await _isend_html(bot, chat_id, local_text if chat_id == message.chat.id else remote_text)
             except Exception:
@@ -142,10 +142,11 @@ async def _maybe_channel_unban(message: types.Message, bot: Bot,
             local_text = translator.get_string('ungban_announce').format(mention, role_word, actor)
             remote_text = translator.get_string('ungban_announce_remote').format(mention, _esc(source_title))
             for chat_id in chat_ids:
-                try:
-                    await _isend_html(bot, chat_id, local_text if chat_id == message.chat.id else remote_text)
-                except Exception:
-                    pass
+                if db_man.is_gpunish_announce_enabled(chat_id):
+                    try:
+                        await _isend_html(bot, chat_id, local_text if chat_id == message.chat.id else remote_text)
+                    except Exception:
+                        pass
         else:
             await _ianswer_html(message, translator.get_string('unban_announce').format(mention, role_word, actor))
     return True
@@ -182,10 +183,11 @@ async def gban(message: types.Message, command: CommandObject, bot: Bot) -> None
             await bot.ban_chat_member(chat_id, target_id)
         except Exception:
             pass
-        try:
-            await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
-        except Exception:
-            pass
+        if db_man.is_gpunish_announce_enabled(chat_id):
+            try:
+                await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
+            except Exception:
+                pass
     _clear_captcha_state_everywhere(target_id)
     _log_global(message, 'log_ban', banned, reason, target_id)
     if is_dm:
@@ -345,10 +347,11 @@ async def ungban(message: types.Message, command: CommandObject, bot: Bot) -> No
             await bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
         except Exception:
             pass
-        try:
-            await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
-        except Exception:
-            pass
+        if db_man.is_gpunish_announce_enabled(chat_id):
+            try:
+                await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
+            except Exception:
+                pass
     if is_dm:
         await _isend_html(bot, message.chat.id, global_text)
         await _dm_target(bot, target_id, _dm_text('dm_unbanned_global_nosrc', '', message))

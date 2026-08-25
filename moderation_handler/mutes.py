@@ -129,7 +129,7 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
                 await _apply_mute(bot, chat_id, target_id, dur_seconds)
             except Exception:
                 pass
-            if not silent:
+            if not silent and db_man.is_gpunish_announce_enabled(chat_id):
                 try:
                     await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
                 except Exception:
@@ -185,7 +185,7 @@ async def _run_unmute(message: types.Message, command: CommandObject, bot: Bot, 
                 await _apply_unmute(bot, chat_id, target_id)
             except Exception:
                 pass
-            if not silent:
+            if not silent and db_man.is_gpunish_announce_enabled(chat_id):
                 try:
                     await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
                 except Exception:

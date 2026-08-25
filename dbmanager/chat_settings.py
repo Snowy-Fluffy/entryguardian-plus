@@ -44,6 +44,18 @@ class ChatSettingsMixin:
 	def is_kick_enabled(self, chat_id):
 		return not bool(self.cursor.execute('SELECT 1 FROM kick_disabled WHERE chat_id=?', (chat_id,)).fetchone())
 
+	def set_gpunish_announce_enabled(self, chat_id, enabled):
+		if enabled:
+			self.cursor.execute('DELETE FROM gpunish_announce_disabled WHERE chat_id=?', (chat_id,))
+		else:
+			self.cursor.execute('INSERT OR IGNORE INTO gpunish_announce_disabled(chat_id) VALUES (?)', (chat_id,))
+		self.connection.commit()
+
+	def is_gpunish_announce_enabled(self, chat_id):
+		return not bool(self.cursor.execute(
+			'SELECT 1 FROM gpunish_announce_disabled WHERE chat_id=?', (chat_id,)
+		).fetchone())
+
 	def set_raid_mode(self, chat_id, on):
 		if on:
 			self.cursor.execute('INSERT OR IGNORE INTO raid_mode(chat_id) VALUES (?)', (chat_id,))

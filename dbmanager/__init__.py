@@ -58,6 +58,8 @@ class DBManager(UsersMixin, RolesMixin, BansMixin, MutesMixin, ChatSettingsMixin
 			self.cursor.execute('CREATE TABLE captcha_disabled(chat_id INTEGER PRIMARY KEY)')
 		if 'kick_disabled' not in tables:
 			self.cursor.execute('CREATE TABLE kick_disabled(chat_id INTEGER PRIMARY KEY)')
+		if 'gpunish_announce_disabled' not in tables:
+			self.cursor.execute('CREATE TABLE gpunish_announce_disabled(chat_id INTEGER PRIMARY KEY)')
 		if 'pending_unbans' not in tables:
 			self.cursor.execute('CREATE TABLE pending_unbans(chat_id INTEGER, user_id INTEGER, next_ts INTEGER, UNIQUE(chat_id, user_id))')
 		if 'raid_mode' not in tables:

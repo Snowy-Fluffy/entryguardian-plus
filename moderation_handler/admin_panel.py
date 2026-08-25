@@ -115,6 +115,12 @@ async def _build_chat_menu(bot: Bot, chat_id: int, user_id: int) -> tuple[str, I
             ),
             callback_data=f'adm:delsys:{chat_id}',
         )],
+        [InlineKeyboardButton(
+            text=translator.get_string(
+                'admin_btn_gann_on' if db_man.is_gpunish_announce_enabled(chat_id) else 'admin_btn_gann_off'
+            ),
+            callback_data=f'adm:gann:{chat_id}',
+        )],
         [InlineKeyboardButton(text=translator.get_string('admin_btn_antispam'), callback_data=f'adm:asp:{chat_id}')],
         [InlineKeyboardButton(
             text=translator.get_string(
@@ -456,6 +462,13 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
         db_man.set_delete_system_messages(chat_id, new_state)
         _record_log(chat_id, callback.from_user, 'log_delsys',
                     translator.get_string('delsys_state_on' if new_state else 'delsys_state_off'))
+        text, markup = await _build_chat_menu(bot, chat_id, user_id)
+        await _edit(callback.message, text, markup)
+    elif action == 'gann':
+        new_state = not db_man.is_gpunish_announce_enabled(chat_id)
+        db_man.set_gpunish_announce_enabled(chat_id, new_state)
+        _record_log(chat_id, callback.from_user, 'log_gann',
+                    translator.get_string('gann_state_on' if new_state else 'gann_state_off'))
         text, markup = await _build_chat_menu(bot, chat_id, user_id)
         await _edit(callback.message, text, markup)
     elif action == 'jreq':
