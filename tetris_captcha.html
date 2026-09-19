@@ -1,16 +1,16 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="en">
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Tetris CAPTCHA</title>
     <style>
         :root {
-            --bg: #111;
-            --border: #2e3147;
-            --text: #e2e4ef;
-            --muted: #8890b5;
-            --accent: #58a6ff;
+            --bg: #0b0d10;
+            --border: #1f2329;
+            --text: #e6e8eb;
+            --muted: #8b93a1;
+            --accent: #5b9cff;
             --success: #3fb950;
             --danger: #f85149;
         }
@@ -61,7 +61,7 @@
         }
         .piece-canvas:hover {
             border-color: var(--accent);
-            box-shadow: 0 0 10px rgba(88,166,255,0.3);
+            box-shadow: 0 0 10px rgba(91,156,255,0.3);
         }
         .piece-canvas.dragging { opacity: 0.4; }
         .drag-ghost {
@@ -85,11 +85,11 @@
 <body>
     <div class="captcha-area">
         <div class="pieces-panel" id="piecesPanelTop"></div>
-        <p class="hint" id="captchaHint">Поставьте фигуры на свои места</p>
+        <p class="hint" id="captchaHint">Place the pieces on the marked cells</p>
         <canvas id="boardCanvas"></canvas>
         <div class="pieces-panel" id="piecesPanelBottom"></div>
     </div>
     <div class="captcha-feedback" id="captchaFeedback"></div>
-    <script src="tetris_captcha.js?v=3"></script>
+    <script src="tetris_captcha.js?v=4"></script>
 </body>
 </html>

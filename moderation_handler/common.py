@@ -22,6 +22,7 @@ from typing import Any, Awaitable
 import asyncio
 import html
 import re
+import time
 from aiogram import Router, types, Bot
 from aiogram.types import ChatPermissions
 from aiogram.filters import CommandObject
@@ -134,32 +135,113 @@ def _italic(text: str) -> str:
     return f'<i>{html.escape(text, quote=False)}</i>'
 
 
-async def _ianswer(message: types.Message, text: str, disable_preview: bool = False) -> types.Message:
-    """Reply in the chat using the bot's standard italic styling."""
-    return await message.answer(
+def _schedule_delete(chat_id: int, message_id: int, delay: int) -> None:
+    """Queue one of the bot's own messages for deletion `delay` seconds from now. Goes through
+    the persistent `scheduled_deletes` table (drained by scheduled_delete_task) rather than an
+    in-process sleep, so a pending auto-delete survives a bot restart."""
+    db_man.schedule_delete(chat_id, message_id, db_man.unix_time() + max(0, int(delay)))
+
+
+def _service_ttl(chat: types.Chat, ttl: int | None) -> int:
+    """Seconds after which a *service* reply (plain italic: errors, confirmations, /rules ...)
+    should auto-delete: an explicit ttl wins, otherwise config.SERVICE_REPLY_TTL. Never in DM
+    (nothing to declutter there), and 0 means keep."""
+    if chat.type not in _GROUP_TYPES:
+        return 0
+    return config.SERVICE_REPLY_TTL if ttl is None else max(0, ttl)
+
+
+async def _ianswer(message: types.Message, text: str, disable_preview: bool = False,
+                   ttl: int | None = None) -> types.Message:
+    """Reply in the chat using the bot's standard italic styling. This is the *service reply*
+    helper (errors, confirmations, /rules, ...): in a group the message is auto-deleted after
+    `ttl` seconds (default config.SERVICE_REPLY_TTL; 0 keeps it). Punishment announcements go
+    through _ianswer_html/_isend_html instead and are never auto-deleted."""
+    sent = await message.answer(
         _italic(text),
         parse_mode='HTML',
         link_preview_options=types.LinkPreviewOptions(is_disabled=True) if disable_preview else None,
     )
+    delay = _service_ttl(message.chat, ttl)
+    if delay:
+        _schedule_delete(message.chat.id, sent.message_id, delay)
+    return sent
 
 
-async def _isend(bot: Bot, chat_id: int, text: str) -> types.Message:
-    """Send an italic message to a chat."""
-    return await bot.send_message(chat_id, _italic(text), parse_mode='HTML')
+async def _isend(bot: Bot, chat_id: int, text: str, ttl: int | None = None) -> types.Message:
+    """Send an italic *service* message to a chat (see _ianswer for the auto-delete rule; here
+    the chat type isn't known, so the TTL applies to any non-private chat id — i.e. negative)."""
+    sent = await bot.send_message(chat_id, _italic(text), parse_mode='HTML')
+    delay = 0 if chat_id > 0 else (config.SERVICE_REPLY_TTL if ttl is None else max(0, ttl))
+    if delay:
+        _schedule_delete(chat_id, sent.message_id, delay)
+    return sent
 
 
-async def _delete_after(bot: Bot, chat_id: int, message_id: int, delay: int) -> None:
-    await asyncio.sleep(delay)
-    try:
-        await bot.delete_message(chat_id, message_id)
-    except Exception:
-        pass
+_SCHEDULED_DELETE_INTERVAL = 5
+_SCHEDULED_DELETE_THROTTLE = 0.1
+
+
+async def scheduled_delete_task(bot: Bot) -> None:
+    """Drain the persistent auto-delete queue: every few seconds delete every bot message whose
+    deadline has passed, paced so a backlog (e.g. right after a restart) stays well under
+    Telegram's request limit. If Telegram still answers with Retry-After, wait it out and leave
+    the row — and the rest of the batch — for the next tick instead of dropping it. Any other
+    failure (already gone, no rights, >48h old) drops the row: nothing more can be done with it."""
+    while True:
+        await asyncio.sleep(_SCHEDULED_DELETE_INTERVAL)
+        try:
+            due = db_man.get_due_deletes(db_man.unix_time())
+        except Exception:
+            continue
+        for chat_id, message_id in due:
+            try:
+                await bot.delete_message(chat_id, message_id)
+            except Exception as e:
+                retry_after = int(getattr(e, 'retry_after', 0) or 0)
+                if retry_after:
+                    await asyncio.sleep(retry_after + 1)
+                    break
+            db_man.remove_scheduled_delete(chat_id, message_id)
+            await asyncio.sleep(_SCHEDULED_DELETE_THROTTLE)
+
+
+_NATIVE_ADMIN_TTL = 300
+"""How long (seconds) a chat's fetched list of Telegram-native administrators is trusted before
+it's re-fetched. Promotions/demotions also invalidate it directly (chat_member_handler), so the
+TTL is only a safety net."""
+
+_native_admins: dict[int, tuple[float, frozenset[int]]] = {}
+"""chat_id -> (fetched_at (monotonic), ids of creator + administrators)."""
+
+
+async def _is_native_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
+    """Whether the user is a Telegram-native admin (creator/administrator, appointed through
+    Telegram itself) of this chat — cheap enough to call on every message, since the admin list
+    is fetched once per chat and cached (see _NATIVE_ADMIN_TTL). Distinct from the bot's own
+    role table (permissions.is_staff) and from _native_admin_ok(), which does a precise one-off
+    get_chat_member for a punishment command's target. On an API failure the previous list (or
+    an empty one) is kept until the next TTL expiry, so a hiccup never throws here."""
+    entry = _native_admins.get(chat_id)
+    if entry is None or time.monotonic() - entry[0] > _NATIVE_ADMIN_TTL:
+        try:
+            ids = frozenset(m.user.id for m in await bot.get_chat_administrators(chat_id))
+        except Exception:
+            ids = entry[1] if entry else frozenset()
+        entry = (time.monotonic(), ids)
+        _native_admins[chat_id] = entry
+    return user_id in entry[1]
+
+
+def invalidate_native_admins(chat_id: int) -> None:
+    """Forget a chat's cached admin list — called on any member status change there, so a
+    promotion/demotion takes effect on the next message rather than after the TTL."""
+    _native_admins.pop(chat_id, None)
 
 
 async def _deny(message: types.Message) -> None:
     """Post the 'no permission' notice (italic) and auto-remove it after 10 seconds."""
-    sent = await _ianswer(message, translator.get_string('mod_no_permission'))
-    _spawn(_delete_after(message.bot, message.chat.id, sent.message_id, 10))
+    await _ianswer(message, translator.get_string('mod_no_permission'), ttl=10)
 
 
 def _esc(text: str) -> str:
@@ -380,6 +462,25 @@ async def _hierarchy_ok(message: types.Message, target_id: int) -> bool:
     return True
 
 
+async def _native_admin_ok(message: types.Message, bot: Bot, target_id: int) -> bool:
+    """Refuse to punish a Telegram-native admin (creator/administrator of this chat, appointed
+    through Telegram itself, regardless of any bot role). Telegram would reject the ban/mute
+    anyway; checking up front gives a clear answer instead of a silent `ban_failed` or a
+    blocklist/mute row the chat can't actually enforce. Only meaningful in a group — a global
+    command sent from DM has no chat to check against, so it's allowed through. An unknown
+    target (never in the chat) also passes: the command then behaves exactly as before."""
+    if message.chat.type not in _GROUP_TYPES:
+        return True
+    try:
+        member = await bot.get_chat_member(message.chat.id, target_id)
+    except Exception:
+        return True
+    if member.status in ('creator', 'administrator'):
+        await _ianswer(message, translator.get_string('cannot_target_native_admin'))
+        return False
+    return True
+
+
 def _record_log(chat_id: int, actor: types.User, action_key: str, target_label: str,
                 reason: str = '', target_id: int | None = None) -> None:
     """Append a staff action to the per-chat history.
@@ -403,7 +504,24 @@ def _log_action(message: types.Message, action_key: str, target_label: str,
 
 
 def _log_global(message: types.Message, action_key: str, target_label: str,
-                reason: str = '', target_id: int | None = None) -> None:
+                reason: str = '', target_id: int | None = None, *, everywhere: bool = False) -> None:
+    """Log an action issued by a command that may also be sent from DM.
+
+    everywhere=True is for *global* actions (gban/gmute and their reversals): the entry goes
+    into the log of every chat the bot knows (bot_chats, plus the current group), so it shows
+    up in each chat's staff log and /punl — including when an owner issues it from DM.
+
+    everywhere=False (local actions that share a code path with global ones, e.g. _run_mute
+    with glob=False): in a group, log to that chat only; from DM, to every chat the issuer
+    administers — owners have no "own" chats, so nothing is logged for them.
+    """
+    if everywhere:
+        chat_ids = set(db_man.get_bot_chats())
+        if message.chat.type in _GROUP_TYPES:
+            chat_ids.add(message.chat.id)
+        for chat_id in chat_ids:
+            _record_log(chat_id, message.from_user, action_key, target_label, reason, target_id)
+        return
     if message.chat.type in _GROUP_TYPES:
         _record_log(message.chat.id, message.from_user, action_key, target_label, reason, target_id)
         return

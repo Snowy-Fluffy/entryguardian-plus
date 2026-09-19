@@ -21,7 +21,7 @@ from .common import (
     router, db_man, translator, _GROUP_TYPES,
     _delete_silently, _ianswer, _ianswer_html, _get_target_or_reply, _is_bot_target,
     _log_action, _reply_channel, _require, _display_name_both, _display_name_html,
-    _spawn, _delete_after,
+    _schedule_delete, _service_ttl,
 )
 
 
@@ -126,7 +126,9 @@ async def staff(message: types.Message, bot: Bot) -> None:
     mods = [uid for uid, role in rows if role == 'moderator']
 
     if not admins and not mods:
-        await message.answer(translator.get_string('staff_empty'))
+        sent = await message.answer(translator.get_string('staff_empty'))
+        if _service_ttl(message.chat, None):
+            _schedule_delete(message.chat.id, sent.message_id, _service_ttl(message.chat, None))
         return
 
     admin_names = [await _display_name_html(bot, message.chat.id, uid) for uid in admins]
@@ -142,11 +144,14 @@ async def staff(message: types.Message, bot: Bot) -> None:
         translator.get_string('staff_mods'),
         '\n'.join(f'• {n}' for n in mod_names) if mod_names else none,
     ]
-    await message.answer(
+    sent = await message.answer(
         '\n'.join(lines),
         parse_mode='HTML',
         link_preview_options=types.LinkPreviewOptions(is_disabled=True),
     )
+    # /staff is a service reply like /rules — same auto-delete, just not italic.
+    if _service_ttl(message.chat, None):
+        _schedule_delete(message.chat.id, sent.message_id, _service_ttl(message.chat, None))
 
 
 @router.message(Command('help'))
@@ -166,4 +171,4 @@ async def help_command(message: types.Message) -> None:
         parts.append(translator.get_string('help_mod'))
     parts.append(translator.get_string('help_everyone'))
     sent = await message.answer('\n\n'.join(parts))
-    _spawn(_delete_after(message.bot, message.chat.id, sent.message_id, 60))
+    _schedule_delete(message.chat.id, sent.message_id, 60)

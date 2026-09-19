@@ -1,4 +1,8 @@
-aiogram
+# Pinned to a commit, not a release: fixes ClientDecodeError on Telegram's new
+# rich_message "buttons" block (Bot API 10.3). Not yet on PyPI as of 2026-08-26
+# (latest release is 3.30.0) - swap for aiogram==3.31.0+ once that's published.
+# https://github.com/aiogram/aiogram/commit/c2af7b37cdec0c1fc7b781a13430dcab457631ea
+aiogram @ https://github.com/aiogram/aiogram/archive/c2af7b37cdec0c1fc7b781a13430dcab457631ea.tar.gz
 aiohttp
 python-dotenv
 Pillow

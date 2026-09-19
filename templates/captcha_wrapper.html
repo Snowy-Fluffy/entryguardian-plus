@@ -1,113 +1,198 @@
 <!DOCTYPE html>
-<html lang="ru">
+<html lang="__LANG__">
 
 <head>
-    <title>Captcha</title>
+    <title>__WEB_TITLE__</title>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="color-scheme" content="dark">
     <script src="https://challenges.cloudflare.com/turnstile/v0/api.js?render=explicit" async defer></script>
     <link rel="stylesheet" href="/altcha/altcha.css">
     <style>
-        * {
+        :root {
+            --bg: #0b0d10;
+            --card: #111418;
+            --border: #1f2329;
+            --text: #e6e8eb;
+            --muted: #8b93a1;
+            --accent: #5b9cff;
+            --accent-hover: #79b0ff;
+            --success: #3fb950;
+            --danger: #f85149;
+        }
+
+        *, *::before, *::after {
             box-sizing: border-box;
             margin: 0;
             padding: 0;
         }
 
+        html, body {
+            min-height: 100%;
+        }
+
         body {
-            background: #111;
+            background: var(--bg);
+            color: var(--text);
+            font-family: -apple-system, BlinkMacSystemFont, 'Inter', 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+            -webkit-font-smoothing: antialiased;
             display: flex;
-            flex-direction: column;
             align-items: center;
             justify-content: center;
             min-height: 100vh;
-            font-family: 'Courier New', monospace;
-            color: #eee;
-            gap: 16px;
+            padding: 16px;
         }
 
-        h2 {
-            color: #ff4444;
-            font-size: 1.3rem;
-            letter-spacing: 2px;
+        .card {
+            width: 100%;
+            max-width: 560px;
+            background: var(--card);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 24px;
+        }
+
+        .head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            margin-bottom: 20px;
+        }
+
+        .brand {
+            font-size: 0.75rem;
+            font-weight: 600;
+            letter-spacing: 0.14em;
+            text-transform: uppercase;
+            color: var(--muted);
+        }
+
+        .steps {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .bars {
+            display: flex;
+            gap: 5px;
+        }
+
+        .bar {
+            width: 22px;
+            height: 4px;
+            border-radius: 2px;
+            background: var(--border);
+            transition: background 0.2s;
+        }
+
+        .bar.active { background: var(--accent); }
+        .bar.done { background: var(--success); }
+
+        #step-label {
+            font-size: 0.75rem;
+            color: var(--muted);
+            white-space: nowrap;
+        }
+
+        .stage { display: none; }
+        .stage.on { display: block; }
+
+        h1 {
+            font-size: 1.35rem;
+            font-weight: 600;
+            letter-spacing: -0.01em;
+            margin-bottom: 8px;
+        }
+
+        .stage p {
+            color: var(--muted);
+            line-height: 1.55;
+            font-size: 0.95rem;
+        }
+
+        .btn {
+            display: inline-block;
+            margin-top: 20px;
+            padding: 11px 22px;
+            background: var(--accent);
+            color: #0b0d10;
+            border: 0;
+            border-radius: 8px;
+            font: inherit;
+            font-size: 0.95rem;
+            font-weight: 600;
+            cursor: pointer;
+            transition: background 0.15s;
+        }
+
+        .btn:hover { background: var(--accent-hover); }
+
+        .btn.ghost {
+            background: transparent;
+            color: var(--text);
+            border: 1px solid var(--border);
+        }
+
+        .btn.ghost:hover { border-color: var(--muted); background: transparent; }
+
+        #frame-wrap {
+            display: flex;
+            justify-content: center;
         }
 
         iframe {
-            border: 2px solid #444;
             display: block;
             max-width: 100%;
+            border: 0;
+            border-radius: 10px;
+            background: #000;
         }
 
-        #intro {
-            position: fixed;
-            top: 0;
-            left: 0;
-            width: 100%;
-            height: 100%;
-            background: #111;
+        .widget {
+            margin-top: 16px;
             display: flex;
-            flex-direction: column;
-            align-items: center;
             justify-content: center;
-            z-index: 100;
-            gap: 20px;
-            padding: 24px;
-            text-align: center;
         }
 
-        #intro h2 {
-            font-size: 1.5rem;
+        .status {
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
 
-        #intro-desc {
-            font-size: 1.1rem;
-            color: #ccc;
-            max-width: 420px;
-            line-height: 1.5;
+        .dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            background: var(--accent);
+            flex: none;
+            animation: pulse 1.2s ease-in-out infinite;
         }
 
-        #btn-start {
-            margin-top: 8px;
-            padding: 12px 32px;
-            background: #1a1a1a;
-            border: 2px solid #33ff33;
-            color: #33ff33;
-            font-family: 'Courier New', monospace;
-            font-size: 1.1rem;
-            cursor: pointer;
-            letter-spacing: 2px;
-            transition: background 0.15s, color 0.15s;
+        @keyframes pulse {
+            0%, 100% { opacity: 0.35; }
+            50% { opacity: 1; }
         }
 
-        #btn-start:hover {
-            background: #33ff33;
-            color: #111;
+        .dot.ok {
+            background: var(--success);
+            animation: none;
         }
 
-        #result, #stage-turnstile, #stage-altcha {
-            display: none;
-            text-align: center;
-            padding: 24px 32px;
-            background: #1a1a1a;
-            border: 2px solid #33aa33;
-            border-radius: 4px;
-        }
-
-        #result p, #stage-turnstile p, #stage-altcha p {
-            margin-bottom: 14px;
-            font-size: 1rem;
-            color: #ccc;
+        .dot.err {
+            background: var(--danger);
+            animation: none;
         }
 
         #code-box {
             display: inline-block;
-            background: #0a0a0a;
-            border: 2px solid #33ff33;
+            margin: 16px 0 12px;
+            padding: 10px;
+            background: var(--bg);
+            border: 1px solid var(--border);
             border-radius: 10px;
-            padding: 14px 18px;
-            margin: 14px 0;
-            max-width: 100%;
-            box-shadow: 0 0 18px rgba(51, 255, 51, 0.35), inset 0 0 24px rgba(51, 255, 51, 0.06);
         }
 
         #code-box img {
@@ -115,40 +200,69 @@
             width: 220px;
             max-width: 100%;
             height: auto;
-            border-radius: 5px;
+            border-radius: 6px;
         }
 
-        #hint {
-            font-size: 0.85rem;
-            color: #888;
-            margin-top: 8px;
+        .hint {
+            font-size: 0.85rem !important;
+        }
+
+        @media (max-width: 420px) {
+            .card { padding: 20px 16px; }
+            #step-label { display: none; }
         }
     </style>
 </head>
 
 <body>
-    <div id="intro">
-        <h2>CAPTCHA</h2>
-        <p id="intro-desc">__CAPTCHA_DESC__</p>
-        <button id="btn-start">Пройти капчу</button>
+    <div class="card">
+        <div class="head">
+            <div class="brand">__WEB_BRAND__</div>
+            <div class="steps">
+                <span id="step-label"></span>
+                <div class="bars" id="bars"></div>
+            </div>
+        </div>
+
+        <div id="stage-intro" class="stage">
+            <h1>__WEB_INTRO_TITLE__</h1>
+            <p id="intro-desc">__CAPTCHA_DESC__</p>
+            <button id="btn-start" class="btn">__WEB_START__</button>
+        </div>
+
+        <div id="stage-game" class="stage">
+            <div id="frame-wrap">
+                <iframe id="frame" src="" width="__IFRAME_WIDTH__" height="__IFRAME_HEIGHT__" style="__IFRAME_STYLE__"
+                    scrolling="auto" frameborder="0"></iframe>
+            </div>
+        </div>
+
+        <div id="stage-turnstile" class="stage">
+            <div class="status"><span class="dot"></span><p>__WEB_TURNSTILE__</p></div>
+            <div class="widget"><div id="turnstile-widget"></div></div>
+        </div>
+
+        <div id="stage-altcha" class="stage">
+            <div class="status"><span class="dot"></span><p>__WEB_ALTCHA__</p></div>
+            <div class="widget">
+                <altcha-widget id="altcha-widget" configuration='{"hideLogo":true,"hideFooter":true}'></altcha-widget>
+            </div>
+        </div>
+
+        <div id="stage-result" class="stage">
+            <div class="status"><span class="dot ok"></span><h1 style="margin:0">__WEB_VERIFIED__</h1></div>
+            <p style="margin-top:8px">__WEB_SEND_CODE__</p>
+            <div id="code-box"><img id="code-img" alt="__WEB_CODE_ALT__"></div>
+            <p class="hint">__WEB_HINT__</p>
+        </div>
+
+        <div id="stage-error" class="stage">
+            <div class="status"><span class="dot err"></span><h1 id="error-title" style="margin:0">Something went wrong</h1></div>
+            <p id="error-text" style="margin-top:8px"></p>
+            <button id="btn-retry" class="btn ghost">__WEB_TRY_AGAIN__</button>
+        </div>
     </div>
-    <h2>CAPTCHA</h2>
-    <iframe id="frame" src="" width="__IFRAME_WIDTH__" height="__IFRAME_HEIGHT__" style="__IFRAME_STYLE__"
-        scrolling="auto" frameborder="0"></iframe>
-    <div id="stage-turnstile">
-        <p>Проверка браузера...</p>
-        <div id="turnstile-widget"></div>
-    </div>
-    <div id="stage-altcha">
-        <p>Ещё один момент...</p>
-        <altcha-widget id="altcha-widget" configuration='{"hideLogo":true,"hideFooter":true}'></altcha-widget>
-    </div>
-    <div id="result">
-        <p>&#x2705; Капча пройдена!</p>
-        <p>Отправьте этот код боту:</p>
-        <div id="code-box"><img id="code-img" alt="код"></div>
-        <div id="hint">Введите код в чате с ботом для завершения верификации</div>
-    </div>
+
     <script src="/altcha/altcha.js"></script>
     <script>
         globalThis.$altcha.algorithms.set('PBKDF2/SHA-512', function () {
@@ -158,31 +272,78 @@
     <script>
         var uuid = '__UUID__';
         var challenge = '__CHALLENGE__';
-        var iframeSrc = '__IFRAME_SRC__';
+        var iframeSrc = __IFRAME_SRC__;
         var turnstileSiteKey = '__TURNSTILE_SITE_KEY__';
         var turnstileEnabled = __TURNSTILE_ENABLED__;
+        var initialState = '__INITIAL_STATE__';
+        var captchaText = __I18N_JSON__;
         var done = false;
         var turnstileWidgetId = null;
+
+        // Step ids in order (labels come from captchaText.web_step_*); 'browser' only exists when
+        // Turnstile is configured.
+        var steps = turnstileEnabled
+            ? ['game', 'browser', 'pow', 'code']
+            : ['game', 'pow', 'code'];
+
+        (function buildBars() {
+            var bars = document.getElementById('bars');
+            for (var i = 0; i < steps.length; i++) {
+                var b = document.createElement('span');
+                b.className = 'bar';
+                bars.appendChild(b);
+            }
+        })();
+
+        function setStep(name) {
+            var idx = steps.indexOf(name);
+            var last = (idx === steps.length - 1);
+            var bars = document.getElementById('bars').children;
+            for (var i = 0; i < bars.length; i++) {
+                bars[i].className = 'bar' + (i < idx || last ? ' done' : (i === idx ? ' active' : ''));
+            }
+            var label = document.getElementById('step-label');
+            if (idx < 0) {
+                label.textContent = '';
+            } else if (last) {
+                label.textContent = captchaText.web_step_done;
+            } else {
+                label.textContent = (idx + 1) + ' / ' + steps.length + ' · ' + captchaText['web_step_' + name];
+            }
+        }
+
+        function show(id) {
+            var stages = document.querySelectorAll('.stage');
+            for (var i = 0; i < stages.length; i++) {
+                stages[i].className = 'stage' + (stages[i].id === id ? ' on' : '');
+            }
+            var el = document.getElementById(id);
+            if (el && el.scrollIntoView) el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function showError(text, canRetry) {
+            done = true;
+            document.getElementById('error-title').textContent = canRetry ? captchaText.web_error_title_failed : captchaText.web_error_title_link;
+            document.getElementById('error-text').textContent = text;
+            document.getElementById('btn-retry').style.display = canRetry ? 'inline-block' : 'none';
+            var bars = document.getElementById('bars').children;
+            for (var i = 0; i < bars.length; i++) bars[i].className = 'bar';
+            document.getElementById('step-label').textContent = '';
+            show('stage-error');
+        }
+
+        function showResult() {
+            setStep('code');
+            document.getElementById('code-img').src = '/api/captcha/' + uuid + '/code.png?t=' + Date.now();
+            show('stage-result');
+        }
 
         function advanceAfterGame() {
             if (turnstileEnabled) {
                 showTurnstileStage();
             } else {
-                document.getElementById('frame').style.display = 'none';
                 showAltchaStage();
             }
-        }
-
-        document.getElementById('btn-start').addEventListener('click', function () {
-            document.getElementById('intro').style.display = 'none';
-            document.getElementById('frame').src = iframeSrc;
-        });
-
-        function showResult() {
-            document.getElementById('stage-altcha').style.display = 'none';
-            document.getElementById('code-img').src = '/api/captcha/' + uuid + '/code.png?t=' + Date.now();
-            document.getElementById('result').style.display = 'block';
-            document.getElementById('result').scrollIntoView({ behavior: 'smooth', block: 'center' });
         }
 
         function renderTurnstile() {
@@ -197,9 +358,8 @@
         }
 
         function showTurnstileStage() {
-            document.getElementById('frame').style.display = 'none';
-            document.getElementById('stage-turnstile').style.display = 'block';
-            document.getElementById('stage-turnstile').scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setStep('browser');
+            show('stage-turnstile');
             if (window.turnstile) {
                 renderTurnstile();
             } else {
@@ -215,7 +375,7 @@
         function onTurnstileSuccess(token) {
             fetch('/api/captcha/' + uuid + '/verify_turnstile', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ challenge: challenge, token: token })
             })
                 .then(function (r) { return r.json(); })
@@ -232,9 +392,8 @@
         }
 
         function showAltchaStage() {
-            document.getElementById('stage-turnstile').style.display = 'none';
-            document.getElementById('stage-altcha').style.display = 'block';
-            document.getElementById('stage-altcha').scrollIntoView({ behavior: 'smooth', block: 'center' });
+            setStep('pow');
+            show('stage-altcha');
             document.getElementById('altcha-widget').configure({
                 challenge: '/api/captcha/' + uuid + '/altcha_challenge?challenge=' + encodeURIComponent(challenge)
             });
@@ -245,7 +404,7 @@
             if (!payload) return;
             fetch('/api/captcha/' + uuid + '/verify_altcha', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
+                headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ challenge: challenge, payload: payload })
             })
                 .then(function (r) { return r.json(); })
@@ -253,9 +412,22 @@
                     if (data.ok) {
                         showResult();
                     } else {
-                        document.getElementById('altcha-widget').reset();
+                        showError(captchaText.web_error_pow, true);
                     }
+                })
+                .catch(function () {
+                    showError(captchaText.web_error_network, true);
                 });
+        });
+
+        document.getElementById('btn-start').addEventListener('click', function () {
+            setStep('game');
+            document.getElementById('frame').src = iframeSrc;
+            show('stage-game');
+        });
+
+        document.getElementById('btn-retry').addEventListener('click', function () {
+            location.reload();
         });
 
         window.addEventListener('message', function (e) {
@@ -278,16 +450,33 @@
 
             fetch('/api/captcha/' + uuid + '/complete', {
                 method: 'POST',
-                headers: {'Content-Type': 'application/json'},
-                body: JSON.stringify({challenge: challenge})
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ challenge: challenge })
             })
                 .then(function (r) { return r.json(); })
                 .then(function (data) {
                     if (data.ok) {
                         advanceAfterGame();
+                    } else {
+                        // Server rejected the play (too fast, not enough progress registered,
+                        // stale challenge). A reload restarts the whole chain cleanly.
+                        showError(captchaText.web_error_game, true);
                     }
+                })
+                .catch(function () {
+                    showError(captchaText.web_error_network, true);
                 });
         });
+
+        if (initialState === 'completed') {
+            done = true;
+            showResult();
+        } else if (initialState === 'error') {
+            showError(captchaText.web_error_expired, false);
+        } else {
+            setStep('game');
+            show('stage-intro');
+        }
     </script>
 </body>
 

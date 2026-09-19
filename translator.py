@@ -15,12 +15,15 @@
 # along with this program. If not, see <http://www.gnu.org/licenses/>.
 
 import json
+import os
+
+_L10N_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'l10n')
 
 class Translator:
 	locale = dict()
 	
 	def __init__(self, lc_code):
-		with open(f'l10n/{lc_code}.json') as file:
+		with open(os.path.join(_L10N_DIR, f'{lc_code}.json'), encoding='utf-8') as file:
 			self.locale = json.load(file)
 	
 	def get_string(self, string_id):

@@ -93,6 +93,20 @@ def _first_seen_line(target_id: int) -> str:
     return translator.get_string('punl_first_seen').format(when)
 
 
+async def _origin_chat_line(bot: Bot, target_id: int) -> str | None:
+    """The 'came in via chat' line for /punl and /uinfo: the first chat whose join put the user
+    through the captcha (captcha_origin, recorded once and never overwritten). None if they
+    never entered via a chat (e.g. only ever /start-ed the bot in DM). Title resolved live —
+    there's no local title cache for chats — falling back to just the id."""
+    origin = db_man.get_captcha_origin(target_id)
+    if origin is None:
+        return None
+    chat_id, ts = origin
+    title = await _chat_title_or_none(bot, chat_id)
+    when = datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M:%S')
+    return translator.get_string('punl_origin_chat').format(_esc(title) if title else '?', chat_id, when)
+
+
 def _global_block_line(target_id: int) -> str | None:
     """The 'globally blocked' line shown at the top of /punl and /uinfo, if the target (user
     or channel — ids never collide between the two) is currently on the global blocklist."""
@@ -190,13 +204,38 @@ async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label
     they're never in seen_users (only real users are tracked there), so 'first seen' would just
     be a meaningless backfilled 'now'."""
     header_lines = [_first_seen_line(target_id)] if include_first_seen else []
+    if include_first_seen:
+        origin_line = await _origin_chat_line(bot, target_id)
+        if origin_line:
+            header_lines.append(origin_line)
+    # In a single-chat (group) view, a global ban/mute that's been lifted locally is flagged
+    # as such — local decisions override global ones (ban_exceptions / mute_exceptions).
+    here = next(iter(chat_ids)) if len(chat_ids) == 1 else None
+    lifted = translator.get_string('punl_local_exception')
     block_line = _global_block_line(target_id)
     if block_line:
+        if here is not None and (db_man.is_ban_exception(here, target_id)
+                                 or db_man.is_channel_ban_exception(here, target_id)):
+            block_line += ' ' + lifted
         header_lines.append(block_line)
     mute_line = _global_mute_line(target_id)
     if mute_line:
+        if here is not None and db_man.is_mute_exception(here, target_id):
+            mute_line += ' ' + lifted
         header_lines.append(mute_line)
     rows = [r for r in rows if r[2] in _PUNISH_LOG_KEYS and r[0] in chat_ids]
+    if len(chat_ids) > 1:
+        # Aggregated (DM) view: a global action is logged in every chat, so the same entry
+        # would repeat once per chat — collapse identical (ts, action, text) rows.
+        seen: set[tuple] = set()
+        deduped = []
+        for r in rows:
+            key = (r[1], r[2], r[3])
+            if key in seen:
+                continue
+            seen.add(key)
+            deduped.append(r)
+        rows = deduped
     if not rows:
         empty = translator.get_string('punl_empty').format(target_label)
         return ('\n'.join(header_lines) + '\n' + empty) if header_lines else empty
@@ -302,6 +341,9 @@ async def uinfo_cmd(message: types.Message, command: CommandObject, bot: Bot) ->
         lines.append(mute_line)
     lines.append(_captcha_status_line(target_id))
     lines.append(_first_seen_line(target_id))
+    origin_line = await _origin_chat_line(bot, target_id)
+    if origin_line:
+        lines.append(origin_line)
     lines += await _captcha_visit_lines(bot, target_id)
     await message.answer('\n'.join(lines), parse_mode='HTML',
                          link_preview_options=types.LinkPreviewOptions(is_disabled=True))

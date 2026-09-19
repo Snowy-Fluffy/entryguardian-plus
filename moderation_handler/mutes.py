@@ -24,7 +24,7 @@ from .common import (
     _require, _require_global, _cooldown_guard, _cooldown_mark,
     _reply_channel, _actor_role_word, _actor_mention,
     _parse_ban, _parse_duration, _human_duration_words,
-    _is_bot_target, _hierarchy_ok, _punish_labels,
+    _is_bot_target, _hierarchy_ok, _native_admin_ok, _punish_labels,
     _dm_text, _dm_target, _log_global,
     _MUTED_PERMS, build_chat_permissions,
 )
@@ -110,6 +110,8 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
         return False
     if not await _hierarchy_ok(message, target_id):
         return False
+    if not await _native_admin_ok(message, bot, target_id):
+        return False
 
     muted_html, muted = await _punish_labels(bot, message, command, target_id)
     label = f'{muted} [{dur_text}]' if dur_text else muted
@@ -118,6 +120,7 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
 
     if glob:
         db_man.set_global_mute(target_id, int(datetime.now().timestamp()) + dur_seconds if dur_seconds else 0)
+        db_man.clear_mute_exceptions(target_id)   # a fresh global mute overrides earlier local amnesties
         local_text = _mute_text(message, muted_html, dur_words, reason)
         remote_text = _mute_remote_text(muted_html, message.chat.title or str(message.chat.id), dur_words, reason)
         global_text = _global_mute_text(muted_html, dur_words, reason)
@@ -153,7 +156,7 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
         else:
             dm_key = 'dm_muted'
         await _dm_target(bot, target_id, _dm_text(dm_key, message.chat.title or str(message.chat.id), message, reason, dur_words))
-    _log_global(message, log_key, label, reason, target_id)
+    _log_global(message, log_key, label, reason, target_id, everywhere=glob)
     return True
 
 
@@ -174,6 +177,7 @@ async def _run_unmute(message: types.Message, command: CommandObject, bot: Bot, 
 
     if glob:
         db_man.remove_global_mute(target_id)
+        db_man.clear_mute_exceptions(target_id)
         local_text = _unmute_text(message, target_html, reason)
         remote_text = _unmute_remote_text(target_html, message.chat.title or str(message.chat.id), reason)
         global_text = _global_unmute_text(target_html, reason)
@@ -193,6 +197,8 @@ async def _run_unmute(message: types.Message, command: CommandObject, bot: Bot, 
         if not silent and is_dm:
             await _isend_html(bot, message.chat.id, global_text)
     else:
+        # Local beats global: this chat's unmute also lifts a global mute here (and only here).
+        db_man.add_mute_exception(message.chat.id, target_id)
         try:
             await _apply_unmute(bot, message.chat.id, target_id)
         except Exception:
@@ -208,7 +214,7 @@ async def _run_unmute(message: types.Message, command: CommandObject, bot: Bot, 
         else:
             dm_key = 'dm_unmuted'
         await _dm_target(bot, target_id, _dm_text(dm_key, message.chat.title or str(message.chat.id), message, reason))
-    _log_global(message, log_key, target, reason, target_id)
+    _log_global(message, log_key, target, reason, target_id, everywhere=glob)
     return True
 
 

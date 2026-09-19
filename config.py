@@ -55,6 +55,13 @@ TRUST_PROXY_HEADERS: bool = os.getenv('TRUST_PROXY_HEADERS', '1').strip().lower(
 # Off by default — enabling this stores personal data (IP addresses), so it's opt-in.
 COLLECT_CAPTCHA_IPS: bool = os.getenv('COLLECT_CAPTCHA_IPS', '0').strip().lower() in ('1', 'true', 'yes', 'on')
 
+# Auto-delete the bot's *service* replies in groups after this many seconds — error messages
+# ("user not found", "no permission", cooldown...), confirmations ("Report sent", raid on/off),
+# /rules, /staff, the "channels are forbidden" notice. Punishment announcements (bans, mutes and
+# their reversals) and welcome messages are never auto-deleted. 0 disables. The queue is stored
+# in the database, so a pending deletion survives a restart.
+SERVICE_REPLY_TTL: int = int(os.getenv('SERVICE_REPLY_TTL', '30'))
+
 # Repeated-message antispam: mutes a user who posts the same content N times in a row within a
 # time window (configurable per chat via /admin). On by default. This requires the bot to look
 # at the content/media id of every message to detect duplicates — turn off if that's a concern.

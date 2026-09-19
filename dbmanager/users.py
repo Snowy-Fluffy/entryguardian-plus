@@ -129,10 +129,28 @@ class UsersMixin:
 		self.connection.commit()
 		return now
 
+	def record_captcha_origin(self, user_id, chat_id):
+		"""Remember the chat a user was first put through the captcha in (the one whose join
+		posted their welcome). First chat only — INSERT OR IGNORE, never overwritten, like
+		captcha_ips — so it answers "where did this account originally come in through" even
+		after pending_chats has been cleared by verification."""
+		self.cursor.execute(
+			'INSERT OR IGNORE INTO captcha_origin(user_id, chat_id, ts) VALUES (?, ?, ?)',
+			(user_id, chat_id, self.unix_time())
+		)
+		self.connection.commit()
+
+	def get_captcha_origin(self, user_id):
+		"""(chat_id, ts) of the user's first captcha chat, or None if they never entered one
+		(e.g. only ever /start-ed the bot directly in DM)."""
+		row = self.cursor.execute('SELECT chat_id, ts FROM captcha_origin WHERE user_id=?', (user_id,)).fetchone()
+		return (row[0], row[1]) if row else None
+
 	_USER_ID_LOOKUPS = (
 		('user', 'id'),
 		('seen_users', 'user_id'),
 		('pending_chats', 'user_id'),
+		('captcha_origin', 'user_id'),
 		('roles', 'user_id'),
 		('blocklist', 'user_id'),
 		('ban_exceptions', 'user_id'),

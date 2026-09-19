@@ -28,7 +28,7 @@ from .common import (
     router, db_man, translator, _GROUP_TYPES, _spawn,
     _seen_cache, _isend, _isend_html, _identity_html, _full_user_info, _chat_info,
     _channel_mention, _message_link, _report_recipients, _human_elapsed, _seconds_to_words,
-    _clear_captcha_state, _MUTED_PERMS,
+    _clear_captcha_state, _MUTED_PERMS, _is_native_admin,
 )
 
 _MESSAGE_RETENTION = 2 * 24 * 3600
@@ -89,6 +89,15 @@ class UserTrackingMiddleware(BaseMiddleware):
     The Bot API cannot turn a plain @username of a regular user into an id, nor can it enumerate
     a group's members when the bot is added. Both are solved by observing messages (privacy mode
     must be disabled): we learn usernames, and we can ban a blocklisted user as soon as they speak.
+
+    Installed on both `dp.message` and `dp.edited_message` (run.py), so an edit can't be used to
+    slip past enforcement — a muted/banned member editing an old message into spam, or editing
+    suspicious Unicode in after the fact. For an edit (`event.edit_date` set) only the enforcement
+    half runs: blocklist/local-ban/mute re-application, the Unicode guard, and channel bans. The
+    bookkeeping half is skipped — the message id was already logged when it was first sent (a
+    second `log_message` would double-count it for /delete_user cN), a command in an edit is never
+    dispatched so cooldowns/command-ban don't apply, and the repeat-message streak must not be
+    bumped by an edit (same message id, would trip the threshold on a single message).
     """
 
     async def __call__(
@@ -98,6 +107,7 @@ class UserTrackingMiddleware(BaseMiddleware):
         data: dict[str, Any],
     ) -> Any:
         user = event.from_user
+        is_edit = event.edit_date is not None
         if user:
             entry = (user.username, user.full_name)
             if _seen_cache.get(user.id) != entry:
@@ -105,13 +115,20 @@ class UserTrackingMiddleware(BaseMiddleware):
                 _seen_cache[user.id] = entry
 
         text = event.text or ''
-        if text.startswith('/') and user and not permissions.is_owner(user.id) and db_man.is_command_banned(user.id):
+        if (
+            text.startswith('/')
+            and not is_edit
+            and user
+            and not permissions.is_owner(user.id)
+            and db_man.is_command_banned(user.id)
+        ):
             cmd = text[1:].split(maxsplit=1)[0].split('@')[0].lower()
             if cmd != 'start':
                 return
 
         if (
             text.startswith('/')
+            and not is_edit
             and user
             and event.chat
             and event.chat.type in _GROUP_TYPES
@@ -123,7 +140,11 @@ class UserTrackingMiddleware(BaseMiddleware):
             db_man.record_cooldown_use(event.chat.id, user.id, _PLAIN_USER_CMD_KEY)
 
         if event.chat and event.chat.type in _GROUP_TYPES:
-            if (event.new_chat_members or event.left_chat_member) and db_man.is_delete_system_messages(event.chat.id):
+            if (
+                not is_edit
+                and (event.new_chat_members or event.left_chat_member)
+                and db_man.is_delete_system_messages(event.chat.id)
+            ):
                 try:
                     await event.delete()
                 except Exception:
@@ -132,7 +153,9 @@ class UserTrackingMiddleware(BaseMiddleware):
 
             if db_man.remember_chat(event.chat.id):
                 _spawn(_sweep_blocklist_chat(event.bot, event.chat.id))
-            if event.sender_chat and event.sender_chat.type == 'channel':
+            if is_edit:
+                pass
+            elif event.sender_chat and event.sender_chat.type == 'channel':
                 db_man.log_channel_message(event.chat.id, event.sender_chat.id, event.message_id, db_man.unix_time())
             elif user:
                 db_man.log_message(event.chat.id, user.id, event.message_id, db_man.unix_time())
@@ -186,7 +209,7 @@ class UserTrackingMiddleware(BaseMiddleware):
                         pass
                     return
 
-            await _check_antispam(event, user)
+            await _check_antispam(event, user, is_edit)
 
             sender_chat = event.sender_chat
             if (
@@ -226,7 +249,7 @@ class UserTrackingMiddleware(BaseMiddleware):
                 return
 
             text = event.text or ''
-            if text.startswith('/') and db_man.is_chat_stopped(event.chat.id):
+            if text.startswith('/') and not is_edit and db_man.is_chat_stopped(event.chat.id):
                 cmd = text[1:].split(maxsplit=1)[0].split('@')[0].lower()
                 if not (cmd in ('startchat', 'stopchat') and user and permissions.is_owner(user.id)):
                     return
@@ -244,23 +267,59 @@ _PLAIN_USER_CMD_KEY = '__any__'
 to never collide with a real command name."""
 
 
-_ZERO_WIDTH_CHARS = frozenset('​‌‍⁠﻿᠎')
+_ZERO_WIDTH_CHARS = frozenset('​⁠﻿᠎')
 _BIDI_CONTROL_CHARS = frozenset('‪‫‬‭‮⁦⁧⁨⁩')
 _ZALGO_MAX_STACK = 4
+
+_LOOKALIKE_SCRIPT_RANGES = (
+    (0x13A0, 0x13FD),    # Cherokee
+    (0xAB70, 0xABBF),    # Cherokee Supplement
+    (0x1D00, 0x1D7F),    # Phonetic Extensions (small-caps lookalikes, e.g. ᴀᴋᴧʙ)
+    (0x1D80, 0x1DBF),    # Phonetic Extensions Supplement
+    (0x2100, 0x214F),    # Letterlike Symbols (ℵ ℶ ℷ etc.)
+    (0x2460, 0x24FF),    # Enclosed Alphanumerics (circled letters/digits)
+    (0x1D400, 0x1D7FF),  # Mathematical Alphanumeric Symbols (bold/italic/fraktur/double-struck)
+)
+
+_LOOKALIKE_EXEMPT = frozenset('№™℃℉℗℠℡ℹΩKÅ℮℀℁℅℆')
+"""Everyday symbols that happen to live inside the Letterlike Symbols block above — the numero
+sign (ubiquitous in Russian: «Заказ №5»), trademark, degree Celsius/Fahrenheit, the ℹ️ emoji's
+base character, sound-recording/service-mark/telephone signs, Ohm/Kelvin/Angstrom, estimated,
+account/care-of... Without this list a plain "№" would get the message deleted."""
+
+
+def _has_lookalike_script(text: str) -> bool:
+    """True if text contains a character from a block that's essentially never handwritten in
+    genuine chat — Cherokee, phonetic/mathematical letter-lookalikes, letterlike symbols,
+    circled letters — but is exactly what 'fancy text' generators and homoglyph word-filter
+    evasion draw from (e.g. swapping a Cyrillic О for a visually identical Cherokee letter).
+    Deliberately broader than 'mixed with normal text' — flags outright, so a message built
+    entirely from these (as spam sometimes is) is still caught. _LOOKALIKE_EXEMPT carves the
+    everyday non-letter symbols back out of those ranges."""
+    return any(
+        ch not in _LOOKALIKE_EXEMPT and any(lo <= ord(ch) <= hi for lo, hi in _LOOKALIKE_SCRIPT_RANGES)
+        for ch in text
+    )
 
 
 def _has_suspicious_unicode(text: str) -> bool:
     """True if text carries invisible/zero-width characters, bidi override/embedding/isolate
-    control characters (direction-spoofing, e.g. hiding a malicious file extension or link), or
-    zalgo (an abnormal stack of combining diacritical marks on one base character). Ordinary text
-    in any language — Arabic/Hebrew/Vietnamese etc. with 1-2 diacritics per letter — never
-    triggers this: LRM/RLM (U+200E/U+200F, common and legitimate in mixed bidi text) are
-    deliberately excluded from _BIDI_CONTROL_CHARS; only the actual direction-override/embedding/
-    isolate characters are treated as suspicious. 'Fancy font' unicode blocks (bold/gothic/etc.)
-    are intentionally not covered — too easy to false-positive on normal stylized text."""
+    control characters (direction-spoofing, e.g. hiding a malicious file extension or link),
+    zalgo (an abnormal stack of combining diacritical marks on one base character), or a
+    lookalike-script character (see _has_lookalike_script). Ordinary text in any language —
+    Arabic/Hebrew/Vietnamese etc. with 1-2 diacritics per letter — never triggers this: LRM/RLM
+    (U+200E/U+200F, common and legitimate in mixed bidi text) are deliberately excluded from
+    _BIDI_CONTROL_CHARS; only the actual direction-override/embedding/isolate characters are
+    treated as suspicious. ZWJ/ZWNJ (U+200D/U+200C) are also deliberately excluded from
+    _ZERO_WIDTH_CHARS despite being zero-width — ZWJ is what glues compound emoji together
+    (family/couple/profession emoji, pride flag, etc. all contain it) and both are used
+    legitimately in several real scripts (e.g. Devanagari conjuncts), so flagging them deleted
+    ordinary emoji as false positives."""
     if any(ch in _ZERO_WIDTH_CHARS for ch in text):
         return True
     if any(ch in _BIDI_CONTROL_CHARS for ch in text):
+        return True
+    if _has_lookalike_script(text):
         return True
     stack = 0
     for ch in text:
@@ -360,7 +419,7 @@ async def _fire_antispam(event: types.Message, kind: str, target: types.User | t
             pass
 
 
-async def _check_antispam(event: types.Message, user: types.User | None) -> None:
+async def _check_antispam(event: types.Message, user: types.User | None, is_edit: bool = False) -> None:
     """Repeat-spam detection: strictly consecutive identical messages within a configurable
     window trigger _fire_antispam once the configurable threshold is reached.
 
@@ -370,13 +429,22 @@ async def _check_antispam(event: types.Message, user: types.User | None) -> None
     @Channel_Bot regardless of which channel posted, so tracking by user id would both miss it
     and wrongly merge unrelated channels' streaks together. An anonymous group admin (sender_chat
     set, but not a channel) and a linked channel's own auto-forwarded post are both exempt —
-    staff and non-spam respectively. Otherwise it's a plain user, tracked/punished by user id,
-    staff/owners exempt.
+    staff and non-spam respectively. Otherwise it's a plain user, tracked/punished by user id;
+    the bot's own staff/owners and Telegram-native admins of the chat (_is_native_admin, cached
+    admin list) are exempt.
+
+    Commands (`/...`) go through the unicode filter but are never counted as repeats — the flat
+    per-user command cooldown is what throttles them — and don't touch the streak either way, so
+    a spammer can't reset their own count by slipping a command in between.
 
     Also runs the (separately toggleable) suspicious-unicode filter first — invisible characters,
     bidi direction-spoofing, zalgo — which deletes the message (no mute/ban, just a staff-log
     entry) and breaks any in-progress repeat streak, since it never reaches the signature check
     below.
+
+    For an edited message (is_edit) only that unicode filter runs: the repeat streak is left
+    untouched, since an edit carries the same message id as the original and bumping the count
+    would let a single message trip the threshold.
     """
     if not config.ANTISPAM_ENABLED:
         return
@@ -393,7 +461,7 @@ async def _check_antispam(event: types.Message, user: types.User | None) -> None
             return
         kind, target, target_key = 'channel', sender_chat, sender_chat.id
     elif user:
-        if permissions.is_staff(db_man, chat_id, user.id):
+        if permissions.is_staff(db_man, chat_id, user.id) or await _is_native_admin(event.bot, chat_id, user.id):
             return
         kind, target, target_key = 'user', user, user.id
     else:
@@ -408,6 +476,12 @@ async def _check_antispam(event: types.Message, user: types.User | None) -> None
         db_man.add_log(chat_id, f'🔤 {translator.get_string("log_unicode_delete")} → {label}',
                        target.id, 'log_unicode_delete')
         db_man.clear_antispam_streak(chat_id, target_key)
+        return
+
+    if is_edit:
+        return
+
+    if (event.text or '').startswith('/'):
         return
 
     sig = _antispam_signature(event)

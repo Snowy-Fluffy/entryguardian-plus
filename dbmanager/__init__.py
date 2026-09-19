@@ -112,6 +112,13 @@ class DBManager(UsersMixin, RolesMixin, BansMixin, MutesMixin, ChatSettingsMixin
 			self.cursor.execute('CREATE TABLE auto_accept(chat_id INTEGER PRIMARY KEY)')
 		if 'delete_system_messages' not in tables:
 			self.cursor.execute('CREATE TABLE delete_system_messages(chat_id INTEGER PRIMARY KEY)')
+		if 'captcha_origin' not in tables:
+			self.cursor.execute('CREATE TABLE captcha_origin(user_id INTEGER PRIMARY KEY, chat_id INTEGER, ts INTEGER)')
+		if 'mute_exceptions' not in tables:
+			self.cursor.execute('CREATE TABLE mute_exceptions(chat_id INTEGER, user_id INTEGER, UNIQUE(chat_id, user_id))')
+		if 'scheduled_deletes' not in tables:
+			self.cursor.execute('CREATE TABLE scheduled_deletes(chat_id INTEGER, message_id INTEGER, delete_at INTEGER, UNIQUE(chat_id, message_id))')
+			self.cursor.execute('CREATE INDEX idx_scheduled_deletes ON scheduled_deletes(delete_at)')
 		if 'captcha_ips' not in tables:
 			self.cursor.execute('CREATE TABLE captcha_ips(user_id INTEGER PRIMARY KEY, ip TEXT, user_agent TEXT, ts INTEGER)')
 		captcha_ip_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(captcha_ips)').fetchall()}

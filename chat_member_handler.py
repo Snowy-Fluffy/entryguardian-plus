@@ -27,6 +27,7 @@ import asyncio
 import html
 import config
 from translator import Translator
+from moderation_handler import invalidate_native_admins
 
 router = Router()
 db_man = DBManager()
@@ -135,6 +136,7 @@ async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
         until_date=int(datetime.now().timestamp()) + 5
     )
 
+    db_man.record_captcha_origin(user_id, chat_id)
     db_man.add_pending_chat(user_id, chat_id)
 
 
@@ -144,9 +146,13 @@ async def cache_chat_member_identity(event: ChatMemberUpdated, bot: Bot) -> None
     filter (join transitions only) is matched first — aiogram stops at the first handler whose
     filters pass, so joins stay handled exclusively there. This one only ever sees every *other*
     chat_member update (promotions, restrictions, leaves, kicks), which still carries a full User
-    object worth caching for future @username command lookups."""
+    object worth caching for future @username command lookups. A status change (promotion,
+    demotion, restriction) also drops the chat's cached Telegram-admin list, so the antispam
+    exemption for native admins follows the change immediately."""
     user = event.new_chat_member.user
     db_man.remember_user(user.id, user.username, user.full_name)
+    if event.old_chat_member.status != event.new_chat_member.status:
+        invalidate_native_admins(event.chat.id)
 
 
 @router.chat_join_request()

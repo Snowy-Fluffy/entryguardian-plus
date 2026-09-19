@@ -99,3 +99,24 @@ class MessageLogMixin:
 			[(chat_id, mid) for mid in message_ids]
 		)
 		self.connection.commit()
+
+	def schedule_delete(self, chat_id, message_id, delete_at):
+		"""Queue one of the bot's own messages for deletion at a unix timestamp. Persisted so a
+		pending auto-delete survives a restart (the old asyncio.sleep approach silently lost
+		them). Re-scheduling the same message just moves its deadline."""
+		self.cursor.execute(
+			'INSERT INTO scheduled_deletes(chat_id, message_id, delete_at) VALUES (?, ?, ?) '
+			'ON CONFLICT(chat_id, message_id) DO UPDATE SET delete_at=excluded.delete_at',
+			(chat_id, message_id, delete_at)
+		)
+		self.connection.commit()
+
+	def get_due_deletes(self, now):
+		return self.cursor.execute(
+			'SELECT chat_id, message_id FROM scheduled_deletes WHERE delete_at<=? ORDER BY delete_at',
+			(now,)
+		).fetchall()
+
+	def remove_scheduled_delete(self, chat_id, message_id):
+		self.cursor.execute('DELETE FROM scheduled_deletes WHERE chat_id=? AND message_id=?', (chat_id, message_id))
+		self.connection.commit()

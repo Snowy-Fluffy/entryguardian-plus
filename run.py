@@ -32,6 +32,7 @@ async def main():
     chat_member_handler.bot_username = bot_info.username
 
     dp.message.outer_middleware(moderation_handler.UserTrackingMiddleware())
+    dp.edited_message.outer_middleware(moderation_handler.UserTrackingMiddleware())
 
     dp.include_router(moderation_handler.router)
     dp.include_router(personal_msg_handler.router)
@@ -39,7 +40,7 @@ async def main():
     dp.include_router(reaction_handler.router)
 
     await asyncio.gather(
-        dp.start_polling(bot, allowed_updates=['message', 'chat_member', 'my_chat_member', 'message_reaction', 'callback_query', 'chat_join_request']),
+        dp.start_polling(bot, allowed_updates=['message', 'edited_message', 'chat_member', 'my_chat_member', 'message_reaction', 'callback_query', 'chat_join_request']),
         webserver.start_server(),
         webserver.rate_limit_cleanup_task(),
         personal_msg_handler.session_expiry_task(bot),
@@ -48,6 +49,7 @@ async def main():
         chat_member_handler.pending_unban_retry_task(bot),
         moderation_handler.flush_messages_task(),
         moderation_handler.purge_old_messages_task(),
+        moderation_handler.scheduled_delete_task(bot),
     )
 
 

@@ -5,6 +5,31 @@
     var _uuid      = _params.get('uuid')      || '';
     var _challenge = _params.get('challenge') || '';
 
+    // UI strings, passed in by the wrapper page (webserver.py) as a JSON `i18n` query parameter
+    // so they follow the bot's LOCALE; the English values here are only a fallback for when the
+    // page is opened on its own. `{0}`/`{1}` are positional placeholders, same as the l10n files.
+    var _i18n = {
+        web_tetris_hint: 'Place the pieces on the marked cells',
+        web_tetris_placed: 'Placed {0} of {1}',
+        web_tetris_rotate: 'Rotate',
+        web_tetris_suspicious: '⚠ Suspicious activity. Try again.',
+        web_tetris_done: '✓ Done! Getting your code…',
+        web_tetris_error: '✗ {0}. Try again.',
+        web_tetris_server_error: 'Server error',
+        web_tetris_no_connection: '✗ No connection. Try again.',
+        web_tetris_too_many: '✗ Too many errors. Try again later.',
+        web_tetris_wrong_piece: '✗ Wrong piece. Try again.'
+    };
+    try {
+        var _given = JSON.parse(_params.get('i18n') || '{}');
+        for (var _k in _given) if (typeof _given[_k] === 'string') _i18n[_k] = _given[_k];
+    } catch (e) { /* malformed param: keep the English fallback */ }
+    function _t(key) {
+        var str = _i18n[key];
+        for (var i = 1; i < arguments.length; i++) str = str.split('{' + (i - 1) + '}').join(arguments[i]);
+        return str;
+    }
+
     const PALETTE = [
         '#00d4ff','#ffd600','#b347d9','#3fb950','#f85149','#f0883e','#58a6ff',
         '#e879f9','#06b6d4','#fb923c','#a78bfa','#4ade80','#f472b6','#fbbf24',
@@ -176,7 +201,7 @@
         canvas.height = BOARD_PX;
         const ctx = canvas.getContext('2d');
 
-        ctx.fillStyle = '#252836';
+        ctx.fillStyle = '#171b21';
         ctx.fillRect(0, 0, BOARD_PX, BOARD_PX);
 
         ctx.strokeStyle = '#333750';
@@ -195,7 +220,7 @@
         for (let y = 0; y < BOARD_CELLS; y++) {
             for (let x = 0; x < BOARD_CELLS; x++) {
                 if (!holeSet.has(x + ',' + y)) {
-                    ctx.fillStyle = '#3a3f55';
+                    ctx.fillStyle = '#2a3140';
                     ctx.fillRect(x * CELL + 2, y * CELL + 2, CELL - 2, CELL - 2);
                 }
             }
@@ -204,7 +229,7 @@
         for (const t of challenge.targets) {
             for (const [cx, cy] of t.cells) {
                 const bx = cx + t.offset.x, by = cy + t.offset.y;
-                ctx.fillStyle = '#151821';
+                ctx.fillStyle = '#0f1216';
                 ctx.fillRect(bx * CELL + 2, by * CELL + 2, CELL - 2, CELL - 2);
                 ctx.strokeStyle = t.color + '40';
                 ctx.lineWidth = 1.5;
@@ -226,7 +251,7 @@
             }
         }
 
-        ctx.strokeStyle = '#2e3147';
+        ctx.strokeStyle = '#1f2329';
         ctx.lineWidth = 2;
         ctx.strokeRect(0, 0, BOARD_PX, BOARD_PX);
     }
@@ -292,8 +317,8 @@
         const placed = challenge.placedCount;
         const total = challenge.targets.length;
         hint.textContent = placed > 0 && placed < total
-            ? 'Размещено ' + placed + ' из ' + total
-            : 'Поставьте фигуры на свои места';
+            ? _t('web_tetris_placed', placed, total)
+            : _t('web_tetris_hint');
     }
 
     function renderPieces() {
@@ -319,8 +344,8 @@
 
             const rotBtn = document.createElement('button');
             rotBtn.textContent = '↻';
-            rotBtn.title = 'Повернуть';
-            rotBtn.style.cssText = 'background:none;border:1px solid #2e3147;color:#8890b5;' +
+            rotBtn.title = _t('web_tetris_rotate');
+            rotBtn.style.cssText = 'background:none;border:1px solid #1f2329;color:#8b93a1;' +
                 'border-radius:4px;padding:1px 5px;cursor:pointer;font-size:12px;line-height:1;';
             rotBtn.addEventListener('click', e => {
                 e.stopPropagation();
@@ -429,12 +454,12 @@
     function onCaptchaSuccess() {
         const fb = document.getElementById('captchaFeedback');
         if (!validateBehavior()) {
-            fb.textContent = '⚠ Подозрительное поведение. Попробуйте ещё раз.';
+            fb.textContent = _t('web_tetris_suspicious');
             fb.className = 'captcha-feedback fail';
             setTimeout(resetChallenge, 1500);
             return;
         }
-        fb.textContent = '✓ Проверка пройдена! Получаем код…';
+        fb.textContent = _t('web_tetris_done');
         fb.className = 'captcha-feedback ok';
         failCount = 0;
 
@@ -449,13 +474,13 @@
                 // The wrapper page (not this iframe) shows the result — it owns the code image.
                 window.parent.postMessage({ type: 'doom_complete', already_done: true }, window.location.origin);
             } else {
-                fb.textContent = '✗ ' + (data.error || 'Ошибка сервера') + '. Попробуйте ещё раз.';
+                fb.textContent = _t('web_tetris_error', data.error || _t('web_tetris_server_error'));
                 fb.className = 'captcha-feedback fail';
                 setTimeout(resetChallenge, 6000);
             }
         })
         .catch(function () {
-            fb.textContent = '✗ Нет соединения. Попробуйте ещё раз.';
+            fb.textContent = _t('web_tetris_no_connection');
             fb.className = 'captcha-feedback fail';
             setTimeout(resetChallenge, 6000);
         });
@@ -465,12 +490,12 @@
         failCount++;
         const fb = document.getElementById('captchaFeedback');
         if (failCount >= MAX_FAILS) {
-            fb.textContent = '✗ Слишком много ошибок. Попробуйте позже.';
+            fb.textContent = _t('web_tetris_too_many');
             fb.className = 'captcha-feedback fail';
             setTimeout(function () { failCount = 0; resetChallenge(); }, 30000);
             return;
         }
-        fb.textContent = '✗ Неверная фигура. Попробуйте ещё раз.';
+        fb.textContent = _t('web_tetris_wrong_piece');
         fb.className = 'captcha-feedback fail';
         setTimeout(resetChallenge, 800 + failCount * 300);
     }

@@ -11,9 +11,11 @@ The captcha type is chosen randomly from the enabled types: **DOOM** (shoot N en
 3. The user completes the minigame in the browser (one of DOOM / Tetris / Mario, chosen at random).
 4. Up to three more stages run before the code is revealed, each gating the next:
    - **Cloudflare Turnstile** — a browser-verification widget; the token is checked server-to-server against Cloudflare's `siteverify` endpoint. Optional: if `TURNSTILE_SITE_KEY`/`TURNSTILE_SECRET_KEY` aren't set, this stage is skipped entirely and the flow goes straight from the minigame to Altcha.
-   - **Altcha** proof-of-work — a self-hosted (`altcha-org/altcha`) widget solving a `PBKDF2/SHA-512` challenge (cost `10000`, genuinely random effort — no pre-solved/deterministic challenges), shown after a short "Ещё один момент..." message. The challenge is signed (HMAC, in-process secret) and bound to the session id so a solved payload can't be replayed against a different session.
+   - **Altcha** proof-of-work — a self-hosted (`altcha-org/altcha`) widget solving a `PBKDF2/SHA-512` challenge (cost `10000`, genuinely random effort — no pre-solved/deterministic challenges), shown after a short "One more moment…" message. The challenge is signed (HMAC, in-process secret) and bound to the session id so a solved payload can't be replayed against a different session.
    - A classic distorted-text **captcha image** (`lepture/captcha`) showing the 6-character code — replaces the old "ghost font" noise-GIF approach (which turned out to be breakable by a script tracking the motion pattern between the foreground/background noise).
 5. The user sends the code to the bot → bot verifies it, unmutes the user in all pending chats, and deletes the welcome message.
+
+The captcha web pages (intro, minigame, verification stages, code, expired-link error) follow the same `LOCALE` as the bot's Telegram messages — every string on them lives in the `web_*` keys of `l10n/ru_RU.json` / `l10n/en_US.json` (the Tetris minigame's status lines are handed to its iframe by the wrapper page, so they're localized too; DOOM and Mario have no text of their own). If the server rejects a minigame result (played too fast, not enough progress registered, stale challenge, lost connection), the page says so and offers a *Try again* button that reloads it, restarting the chain, instead of silently stalling.
 
 Sessions expire after 10 minutes. Failed code attempts are limited; too many wrong attempts result in a temporary block. A newcomer who never passes the captcha within **24 hours** is kicked from the chat (and immediately unbanned, so they can rejoin and try again). This 24h kick is on by default and can be turned off per chat from the admin panel; the welcome message tells the newcomer about the 24-hour limit only when the kick is enabled for that chat. The unban half of a kick is recorded in a persistent queue and retried (honouring rate-limit `Retry-After`) until it succeeds, so a failed/rate-limited unban — or a restart mid-kick — never leaves someone stuck banned. Re-joining within an hour of the last prompt doesn't re-post the welcome message, to avoid spam.
 
@@ -97,6 +99,7 @@ COLLECT_CAPTCHA_IPS=0
 # whether the feature exists at all; requires inspecting every message's content/media id to
 # detect duplicates, so turn off if that's a privacy concern. See "Moderation" below.
 ANTISPAM_ENABLED=1
+SERVICE_REPLY_TTL=30        # seconds before the bot's service replies (errors, confirmations, /rules, /staff) auto-delete in groups; 0 = keep
 ```
 
 ## Moderation
@@ -123,7 +126,7 @@ The bot has a per-chat role system with three levels:
 | `/gmute` | admins, owners | **Global** mute: mute the target in every chat the bot is in, announced in all of them |
 | `/smute` | admins, owners | **Silent local** mute (no announcement) |
 | `/gsmute` | admins, owners | **Silent global** mute (no announcement) |
-| `/unmute [reason]` | moderators, admins, owners | Unmute the target in **this** chat (optional reason) |
+| `/unmute [reason]` | moderators, admins, owners | Unmute the target in **this** chat (optional reason). If the user is **globally** muted, this lifts that mute in this chat only (a local exception, same as `/unban` for a global ban) — they stay muted everywhere else |
 | `/ungmute [reason]` | admins, owners | **Global** unmute across every chat |
 | `/unsmute` | admins, owners | **Silent local** unmute |
 | `/ungsmute` | admins, owners | **Silent global** unmute |
@@ -132,11 +135,11 @@ The bot has a per-chat role system with three levels:
 | `/sdelete_user` | admins, owners | Silent variant of `/delete_user` — same bulk deletion, nothing posted to the chat |
 | `/delete_chat [c<N>\|period]` | admins, owners | Same as `/delete_user`, but for **every tracked message in the chat, from anyone** (users and channels alike) — no target. `/delete_chat c500` clears the last 500 tracked messages, `/delete_chat 1h` clears everything tracked from the last hour, plain `/delete_chat` clears everything tracked (up to the 2-day window) |
 | `/sdelete_chat` | admins, owners | Silent variant of `/delete_chat` — same bulk deletion, nothing posted to the chat |
-| `/punl` | moderators, admins, owners (in a group); admins/owners (in DM) | Show a user's **punishment history** (bans, mutes, their reversals, deletions) plus "First seen", and, if they're currently on the global blocklist, a leading "globally blocked" line. Target by reply, ID or @username. In a group it covers that chat; sent in DM it aggregates across every chat the requester manages, labelling each entry with its chat. **Reply to a channel's post** instead to see that channel's punishment history (bans/unbans only — a channel can't be muted); no "First seen" for channels, since that's only tracked for real users |
-| `/uinfo` | owners only, **private chat with the bot only** (silently ignored elsewhere) | Show a user's display name/@username/id (same resolution as `/punl` in DM), a leading "globally blocked" line if they're currently on the global blocklist, whether they've **passed the captcha** (or are currently temp-blocked from wrong code attempts, or never started it), "First seen", and, if `COLLECT_CAPTCHA_IPS` is on and recorded, the IP/User-Agent from their first captcha visit — no punishment history (use `/punl` for that). Target by reply, ID or @username |
+| `/punl` | moderators, admins, owners (in a group); admins/owners (in DM) | Show a user's **punishment history** (bans, mutes, their reversals, deletions) plus "First seen" and the chat they first came in through ("Came in via chat", if they ever entered via a group join), and, if they're currently on the global blocklist or globally muted, a leading line saying so — with "(lifted in this chat)" appended in a group when that global punishment has been lifted locally there. Target by reply, ID or @username. In a group it covers that chat; sent in DM it aggregates across every chat the requester manages, labelling each entry with its chat. **Reply to a channel's post** instead to see that channel's punishment history (bans/unbans only — a channel can't be muted); no "First seen" for channels, since that's only tracked for real users |
+| `/uinfo` | owners only, **private chat with the bot only** (silently ignored elsewhere) | Show a user's display name/@username/id (same resolution as `/punl` in DM), a leading "globally blocked" line if they're currently on the global blocklist, whether they've **passed the captcha** (or are currently temp-blocked from wrong code attempts, or never started it), "First seen", the chat they first came in through ("Came in via chat" — recorded once, when a group join first put them through the captcha; absent if they only ever `/start`-ed the bot in DM), and, if `COLLECT_CAPTCHA_IPS` is on and recorded, the IP/User-Agent from their first captcha visit — no punishment history (use `/punl` for that). Target by reply, ID or @username |
 | `/iptop` | owners only, **private chat with the bot only** (silently ignored elsewhere) | Paginated list of every first-captcha-visit IP shared by 2+ distinct users (requires `COLLECT_CAPTCHA_IPS`), for spotting ban evasion / multi-accounting. A button toggles sorting between most users and most recently matched; tapping an IP drills into the list of users behind it, formatted the same way as `/uinfo` (name, `ipinfo.io` link, User-Agent) |
 | `/raid_on` | admins, owners | Enable **anti-raid** in this chat: every newcomer is locally banned, silently, with no captcha shown. The blocklist ID check still runs. While on, the bot posts a reminder every 5 minutes with how many were banned, so it isn't left on by accident — each new reminder replaces the previous one (old one deleted) instead of piling up in the chat |
-| `/raid_off` | admins, owners | Disable anti-raid |
+| `/raid_off` | admins, owners | Disable anti-raid (`/raid_of` is accepted as an alias) |
 | `/add_adm` | admins, owners | Make the target user an admin of this chat |
 | `/del_adm` | admins, owners | Remove an admin of this chat (the chat creator cannot be removed) |
 | `/add_mod` | admins, owners | Make the target user a moderator of this chat |
@@ -145,13 +148,21 @@ The bot has a per-chat role system with three levels:
 | `/rules` | everyone | Show this chat's custom rules (set via the admin panel) |
 | `/staff` | everyone | List the admins and moderators of this chat (owners are not shown) |
 | `/admin` | admins, owners | Open the **admin panel** in a private chat with the bot (see below) |
+| `/stopchat` | owners only (silently ignored for everyone else) | **Stop** the bot in this chat: it ignores every command from the chat (other than an owner's `/startchat`/`/stopchat`) until resumed. Same as the stop/resume toggle in the admin panel |
+| `/startchat` | owners only (silently ignored for everyone else) | Resume a chat stopped with `/stopchat` |
 | `/help` | everyone | Show the commands available **to that specific user** (regular members see the everyone-commands, moderators also see moderator commands, admins/owners see everything). The message auto-deletes after 1 minute |
 
 The target user can be specified by **replying** to their message, or by passing their numeric **ID** (`/ban 123456789`) or **@username** (`/ban @user spam`). Replying or using a numeric ID is the most reliable. An `@username` is first resolved **live** through Telegram (`getChat`) — which works for channels and public groups but **not for regular users** (the Bot API can't turn a user's @username into an id). For users, the bot falls back to its id↔username/display-name **cache** (filled from observed messages and live lookups; reassignments are tracked, and all values are bound as query parameters so a name can never inject SQL). So `@username` resolves a user only if the bot has seen them; there is a small window where a freshly-reassigned username could still point at the previous owner until the new one is seen — reply or numeric ID avoid this entirely. There is no external/third-party fallback for a cache miss (deliberately — such services are outside the bot's control and unreliable); the command reports that the user couldn't be determined and asks for a reply or numeric ID instead.
 
+**Telegram-native admins can't be punished:** if the target of `/ban`, `/sban`, `/gban`, `/sgban`, `/mute`, `/smute`, `/gmute` or `/gsmute` is an administrator or the creator of the chat *as appointed through Telegram itself* (regardless of any bot role), the bot refuses with "Can't punish a chat administrator appointed through Telegram" instead of attempting it — Telegram would reject the ban/mute anyway, and refusing up front avoids a blocklist/mute record the chat couldn't enforce. The check is against the chat the command is sent in; a global command sent from DM has no chat to check and goes through as before.
+
 **Banning channels:** when someone posts in the group **as a channel**, a normal ban would only hit the anonymous `@Channel_Bot`. Instead, **reply** to the channel's message with `/ban` (or `/gban`, `/sban`, `/sgban`) and the bot bans the *channel sender* itself (and `/unban` … `/unsgban` reverse it). Global channel bans are remembered and re-applied in every chat the bot guards, just like user bans. Channels can't be muted (Telegram has no such action) — the bot tells you to ban instead — and can't be given a staff role.
 
 Command messages are deleted automatically after they are processed (the bot needs the *delete messages* admin right for this).
+
+**Service replies auto-delete.** The bot's own *service* replies in a group — error messages ("user not found", "no permission", cooldown notices, "can't punish…"), confirmations ("Report sent", raid on/off, stop/start chat), `/rules`, `/staff`, the "channels are forbidden" notice — are deleted automatically after `SERVICE_REPLY_TTL` seconds (default 30; `0` keeps them; `/help` uses its own 60 s and "no permission" 10 s). Punishment announcements (bans, mutes and their reversals, antispam) and welcome messages are **never** auto-deleted. Pending deletions are stored in the database, so a restart doesn't leave a reply behind; the queue is drained at a gentle pace and backs off on Telegram's `Retry-After`, so a backlog is worked through rather than lost. Nothing is auto-deleted in DM.
+
+**Edited messages** are re-checked: editing a message re-runs the same enforcement as sending one — a muted or banned member's edit is deleted (and the mute/ban re-applied), a banned channel's or, with "channels forbidden" on, any channel's edit is removed, and the suspicious-Unicode filter applies to the new text. What an edit does *not* do is count as a new message: it isn't logged again for `/delete_user`/`/delete_chat`, doesn't advance the repeated-message antispam streak, and a command typed into an edit is never executed (so no cooldown applies either).
 
 **Plain members** (no role — not a moderator, admin or owner) get a flat **10-second cooldown between commands** in each group chat, to keep a regular user from flooding the chat with commands like `/report`/`/rules`/`/staff`/`/help`. Commands sent within the cooldown are silently dropped (no reply, so as not to add to the noise). Staff and owners are exempt.
 
@@ -159,7 +170,9 @@ Command messages are deleted automatically after they are processed (the bot nee
 
 **Captcha IP/User-Agent tracking (opt-in):** when `COLLECT_CAPTCHA_IPS=1`, the bot remembers the IP address and User-Agent seen the **first** time a user opens their captcha page — the IP of the browser that opened the link, i.e. the user's own. Only that first record is kept: reloading the page, requesting a new captcha later, etc. never overwrites it. Shown only via `/uinfo` and `/iptop` (owners, private chat with the bot only — never in `/punl`, which staff/admins can also reach) as separate "IP:"/"User-Agent:" lines below "First seen:" — each only appears if that particular field was actually captured (e.g. no User-Agent header means no "User-Agent:" line), and both are simply absent if the feature has never recorded anything for that user. `/iptop` is the sweep across the whole table — every IP shared by 2+ distinct users at once — rather than `/uinfo`'s per-target lookup. The IP is a clickable link to `https://ipinfo.io/<ip>` for a quick lookup. This is meant to help spot several Telegram accounts opening the captcha from the same IP (a sign of one operator running multiple accounts), not as an automatic ban signal — shared/mobile IPs (CGNAT) make IP alone unreliable for that. The User-Agent is sanitized before storage (control characters stripped, capped to 300 chars) and HTML-escaped again on display; both fields are always written via parameterized queries, so neither can affect the database regardless of content. Both are stored unencrypted, so treat them as personal data subject to whatever retention/consent rules apply in your jurisdiction. Off by default.
 
-The **global** commands (`/gban`, `/sgban`, `/gmute`, `/gsmute`, `/ungban`, `/unsgban`, `/ungmute`, `/ungsmute`) can also be sent in a **private chat with the bot** by owners and by anyone who is an admin of at least one chat (target by ID or @username). When issued from DM the broadcast to all chats omits the source chat — it just says "globally banned/muted/…" — and the issuer gets a confirmation in DM. Logging from DM goes to each chat the issuer administers (owners aren't logged). Silent variants still post and DM nothing to the chats/target.
+The **global** commands (`/gban`, `/sgban`, `/gmute`, `/gsmute`, `/ungban`, `/unsgban`, `/ungmute`, `/ungsmute`) can also be sent in a **private chat with the bot** by owners and by anyone who is an admin of at least one chat (target by ID or @username). When issued from DM the broadcast to all chats omits the source chat — it just says "globally banned/muted/…" — and the issuer gets a confirmation in DM. **Every global action is logged in every chat** the bot knows (the staff action log in `/admin`, and therefore `/punl` in any of them) — whether issued from a group or from DM, by an admin or an owner. `/punl` in DM aggregates across chats and collapses those repeated entries into one. Silent variants still post and DM nothing to the chats/target.
+
+**Local beats global.** A local decision in a chat overrides a global one there, for bans and mutes alike: `/unban` of a globally banned user, or `/unmute` of a globally muted one, lifts the punishment in that chat only (recorded as a per-chat exception); a later local `/ban`/`/mute` in the same chat cancels that exception; a fresh global `/gban`/`/gmute` (or its reversal) resets every local exception for that user. Everything — local and global mutes/bans and their exceptions — is stored in the database and enforced from it, so it survives restarts.
 
 Punishment announcements (bans, mutes, unbans, unmutes) are posted in italics and always show the staff member and the target with their numeric id. When a target is given by a bare **ID**, the bot looks the person up across every chat it's in (then its local cache) to show a real display name instead of just the number; the name links to the public profile (`t.me/username`) when the account has one, and falls back to plain `display name (id …)` or a bare `id …` when nothing is known. Mute durations are spelled out (e.g. `5 hours` rather than `5h`). For non-silent punishments the bot also DMs the affected user a rephrased copy of the notice (if they have ever started a chat with the bot); silent variants (`/sban`, `/sgban`, `/smute`, `/gsmute`, `/unsban`, `/unsgban`, `/unsmute`, `/ungsmute`) post and DM nothing.
 
@@ -190,7 +203,9 @@ The staff action log keeps the **full history per chat** (bans, unbans, mutes, r
 
 There is no `BLOCKLIST` env variable anymore. The blocklist lives in the database and is populated by `/gban` and `/sgban`. Anyone on the blocklist is banned automatically when they try to join any chat the bot guards. The bot enforces the blocklist on a new chat **automatically**: when it is added to a chat, and again when it is promoted to administrator (the point at which it first gains ban rights), it silently sweeps the whole blocklist over that chat — a preemptive ban works by user id even for members the Bot API can't enumerate, so blocklisted users who were already in the chat are banned without waiting for them to speak. The same sweep also runs the first time the bot sees a chat it was already in before this version was deployed (revealed by the first message there).
 
-As a safety net, a blocklisted user who somehow slips through is still banned as soon as they are next active (send a message), provided the bot is an admin there and privacy mode is off.
+As a safety net, a blocklisted user who somehow slips through is still banned as soon as they are next active — sending a message **or leaving a reaction** — provided the bot is an admin there and privacy mode is off.
+
+**Reactions** get the same treatment as messages, since a reaction is the one thing a restricted member can still do: a reaction from a blocklisted user bans them in that chat; a reaction left *as a channel* bans the channel if it is on the global channel blocklist or if the chat has **"Channels: forbidden"** turned on (with the same "Channels are forbidden in this chat" notice as for a channel post); an anonymous admin's reaction (left as the group itself) is ignored. The reaction itself can't be removed — the Bot API has no way to take back someone else's reaction — so the ban is the whole response. Reacting also registers the user in the bot's id↔username cache and the chat in its list of known chats, same as a message would.
 
 The same kind of safety net applies to mutes: if a muted user's Telegram-level restriction is ever lifted outside the bot (an admin manually unmuting them from Telegram's own UI, a failed `restrict_chat_member` call, etc.) while the bot's own mute record (local or global) hasn't expired yet, the next message they send is deleted and their mute is silently re-applied up to the originally recorded expiry — the bot's mute record is the source of truth, not whatever Telegram's restriction currently says.
 
@@ -214,18 +229,36 @@ by user id would both miss this case and wrongly merge different channels' strea
 can't be muted (no such action exists), a channel that trips the threshold is **banned** instead, with its
 own announcement wording. An **anonymous group admin** posting (`sender_chat` set, but not a channel) is
 exempt like any other staff action, and a linked channel's own auto-forwarded post into the discussion group
-is never treated as spam.
+is never treated as spam. **Telegram-native administrators** of the chat (appointed through Telegram, with or
+without a bot role) are exempt as well — the bot caches each chat's admin list for up to 5 minutes and refreshes
+it immediately on any promotion/demotion it sees. **Bot commands** (`/rules`, `/report`, ...) are never counted
+as repeats and don't affect a streak either way: typing `/rules` three times is not spam (the flat 10-second
+per-member command cooldown is what throttles commands), and a command can't be used to reset a running streak.
 
 A separate per-chat toggle under the same "🚨 Антиспам" menu (on by default, also gated by `ANTISPAM_ENABLED`)
-silently **deletes** messages (text or caption) containing suspicious Unicode: invisible/zero-width
-characters, bidi direction-override/embedding/isolate control characters (used to visually spoof text —
-e.g. making a malicious link or filename display as something else), or zalgo (an abnormal stack of
-combining diacritical marks on one letter). This is deletion only — no mute, no chat announcement, no staff
-DM — just a staff action-log entry (chat's log in `/admin`) naming who it deleted the message from, and
-it doesn't count toward or interact with the repeat-message threshold above beyond breaking an
-in-progress streak (the message never survives to be compared). It's deliberately narrow: ordinary text in
-any language, including normal accented/diacritic use (Arabic, Hebrew, Vietnamese, etc.) and "fancy font"
-Unicode blocks (bold/gothic/etc. styled text), is never flagged.
+silently **deletes** messages (text or caption) containing suspicious Unicode:
+- invisible/zero-width characters (used to hide text from word filters — note ZWJ/ZWNJ are excluded since
+  they're what glues together compound emoji like family/couple/profession emoji and the pride flag, and
+  are also legitimate in some real scripts);
+- bidi direction-override/embedding/isolate control characters (used to visually spoof text — e.g. making
+  a malicious link or filename display as something else; the everyday LRM/RLM marks are excluded);
+- zalgo (an abnormal stack of combining diacritical marks on one letter);
+- a character from a "lookalike" Unicode block — Cherokee, phonetic-extension small-caps, letterlike
+  symbols (ℵ ℶ ℷ), circled letters/digits, or mathematical alphanumeric (bold/italic/fraktur/double-struck)
+  — the letter-forms "fancy text" generators and homoglyph word-filter evasion draw from (e.g. swapping a
+  Cyrillic О for a visually identical Cherokee letter to slip past a banned-word list). This one is
+  intentionally broad — it flags on presence, not just when mixed into otherwise-normal text — since a
+  message can be built entirely from these; genuine use of these specific blocks in ordinary chat is
+  vanishingly rare, unlike normal accented/diacritic text in Arabic, Hebrew, Vietnamese, etc., which this
+  never flags. The everyday *non-letter* symbols that happen to live in the letterlike block are carved
+  back out and never flagged: `№` `™` `℃` `℉` `℗` `℠` `℡` `ℹ` (the ℹ️ emoji) `Ω` `K` `Å` `℮` `℀` `℁` `℅` `℆`.
+  Circled digits/letters (`①` `②` `ⓐ`) *are* still flagged — if your chat numbers lists with them, turn the
+  filter off in `/admin`.
+
+This is deletion only — no mute, no chat announcement, no staff DM — just a staff action-log entry (chat's
+log in `/admin`) naming who it deleted the message from, and it doesn't count toward or interact with the
+repeat-message threshold above beyond breaking an in-progress streak (the message never survives to be
+compared).
 
 > The bot can only enumerate chats it has observed *after* this version was deployed (Telegram does not expose the full list of a bot's chats). Re-adding the bot, or any message in a group, registers that chat for global bans.
 
@@ -299,7 +332,7 @@ entryguardian/
 ├── session_manager.py        # in-memory session store
 ├── personal_msg_handler.py   # /start and code verification in bot DM
 ├── chat_member_handler.py    # new member detection, mute, welcome message
-├── reaction_handler.py       # reaction events
+├── reaction_handler.py       # reaction events: blocklist/channel enforcement, reaction-while-unverified ban
 ├── moderation_handler/       # roles, bans/mutes, anti-raid, deletion, admin panel (package, split by command family)
 ├── permissions.py            # role/permission helpers (owner, admin, moderator)
 ├── dbmanager/                # SQLite: verified users, pending chats, roles, ... (package, one DBManager class via mixins)
@@ -312,7 +345,7 @@ entryguardian/
 ├── altcha.js, altcha.css     # vendored Altcha widget (self-hosted, served under /altcha/)
 ├── workers/pbkdf2.js         # vendored Altcha PoW worker (served under /altcha/workers/)
 ├── templates/
-│   └── captcha_wrapper.html  # outer page that hosts the game iframe
+│   └── captcha_wrapper.html  # the single captcha page: intro → game iframe → verification stages → code (also the expired-link error screen)
 ├── l10n/
 │   ├── ru_RU.json            # Russian locale strings
 │   └── en_US.json            # English locale strings

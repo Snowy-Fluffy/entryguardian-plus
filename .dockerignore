@@ -1,8 +1,9 @@
+.git
+.env
 users.db
+*.db
 __pycache__/
 .claude
-.env
 .codex
 .openai
 ktochitaettotloh
-CLAUDE.md

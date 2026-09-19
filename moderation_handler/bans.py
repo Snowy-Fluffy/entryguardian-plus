@@ -24,7 +24,7 @@ from .common import (
     _reply_channel, _channel_mention, _actor_role_word, _actor_mention, _user_label,
     _record_log, _log_action, _log_global,
     _clear_captcha_state, _clear_captcha_state_everywhere,
-    _ban_target_or_reply, _punish_labels, _hierarchy_ok, _get_target_or_reply,
+    _ban_target_or_reply, _punish_labels, _hierarchy_ok, _native_admin_ok, _get_target_or_reply,
     _dm_text, _dm_target,
 )
 
@@ -105,7 +105,10 @@ async def _maybe_channel_ban(message: types.Message, command: CommandObject, bot
                 await _isend_html(bot, chat_id, local_text if chat_id == message.chat.id else remote_text)
             except Exception:
                 pass
-    _record_log(message.chat.id, message.from_user, log_key, title, reason, channel.id)
+    # Global channel bans are logged in every known chat, like user gbans (chat_ids already
+    # covers bot_chats ∪ {here} when glob); a local one only here.
+    for log_chat in (chat_ids if glob else {message.chat.id}):
+        _record_log(log_chat, message.from_user, log_key, title, reason, channel.id)
     return True
 
 
@@ -132,7 +135,8 @@ async def _maybe_channel_unban(message: types.Message, bot: Bot,
             await bot.unban_chat_sender_chat(chat_id, channel.id)
         except Exception:
             pass
-    _record_log(message.chat.id, message.from_user, log_key, title, '', channel.id)
+    for log_chat in (chat_ids if glob else {message.chat.id}):
+        _record_log(log_chat, message.from_user, log_key, title, '', channel.id)
 
     if not silent:
         role_word = _actor_role_word(message.chat.id, message.from_user.id)
@@ -167,6 +171,8 @@ async def gban(message: types.Message, command: CommandObject, bot: Bot) -> None
     if permissions.is_owner(target_id):
         await _ianswer(message, translator.get_string('mod_cannot_target_owner'))
         return
+    if not await _native_admin_ok(message, bot, target_id):
+        return
 
     banned_html, banned = await _punish_labels(bot, message, command, target_id)
     source_title = message.chat.title or str(message.chat.id)
@@ -189,7 +195,7 @@ async def gban(message: types.Message, command: CommandObject, bot: Bot) -> None
             except Exception:
                 pass
     _clear_captcha_state_everywhere(target_id)
-    _log_global(message, 'log_ban', banned, reason, target_id)
+    _log_global(message, 'log_ban', banned, reason, target_id, everywhere=True)
     if is_dm:
         await _isend_html(bot, message.chat.id, global_text)
         await _dm_target(bot, target_id, _dm_text('dm_banned_global_nosrc', '', message, reason))
@@ -216,6 +222,8 @@ async def ban(message: types.Message, command: CommandObject, bot: Bot) -> None:
         return
     if not await _hierarchy_ok(message, target_id):
         return
+    if not await _native_admin_ok(message, bot, target_id):
+        return
 
     banned_html, banned = await _punish_labels(bot, message, command, target_id)
     try:
@@ -224,6 +232,7 @@ async def ban(message: types.Message, command: CommandObject, bot: Bot) -> None:
         await _ianswer(message, translator.get_string('ban_failed'))
         return
     db_man.add_local_ban(message.chat.id, target_id)
+    db_man.remove_ban_exception(message.chat.id, target_id)   # a local ban overrides an earlier local amnesty
     _clear_captcha_state(message.chat.id, target_id)
     _log_action(message, 'log_lban', banned, reason, target_id)
     await _announce_ban(message, banned_html, reason)
@@ -246,10 +255,12 @@ async def sgban(message: types.Message, command: CommandObject, bot: Bot) -> Non
     if permissions.is_owner(target_id):
         await _ianswer(message, translator.get_string('mod_cannot_target_owner'))
         return
+    if not await _native_admin_ok(message, bot, target_id):
+        return
 
     banned_html, banned = await _punish_labels(bot, message, command, target_id)
     await _global_ban(bot, target_id)
-    _log_global(message, 'log_sban', banned, reason, target_id)
+    _log_global(message, 'log_sban', banned, reason, target_id, everywhere=True)
     if is_dm:
         await _isend_html(bot, message.chat.id, _global_ban_text(banned_html, reason))
 
@@ -268,6 +279,8 @@ async def sban(message: types.Message, command: CommandObject, bot: Bot) -> None
     if permissions.is_owner(target_id):
         await _ianswer(message, translator.get_string('mod_cannot_target_owner'))
         return
+    if not await _native_admin_ok(message, bot, target_id):
+        return
 
     _, banned = await _punish_labels(bot, message, command, target_id)
     try:
@@ -275,6 +288,7 @@ async def sban(message: types.Message, command: CommandObject, bot: Bot) -> None
     except Exception:
         pass
     db_man.add_local_ban(message.chat.id, target_id)
+    db_man.remove_ban_exception(message.chat.id, target_id)   # a local ban overrides an earlier local amnesty
     _clear_captcha_state(message.chat.id, target_id)
     _log_action(message, 'log_slban', banned, reason, target_id)
 
@@ -330,7 +344,7 @@ async def ungban(message: types.Message, command: CommandObject, bot: Bot) -> No
     db_man.remove_from_blocklist(target_id)
     db_man.clear_ban_exceptions(target_id)
     db_man.clear_local_bans(target_id)
-    _log_global(message, 'log_ungban', name, '', target_id)
+    _log_global(message, 'log_ungban', name, '', target_id, everywhere=True)
 
     source_title = message.chat.title or str(message.chat.id)
     role_word = _actor_role_word(message.chat.id, message.from_user.id)
@@ -406,6 +420,6 @@ async def unsgban(message: types.Message, command: CommandObject, bot: Bot) -> N
             await bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
         except Exception:
             pass
-    _log_global(message, 'log_unsgban', name, '', target_id)
+    _log_global(message, 'log_unsgban', name, '', target_id, everywhere=True)
     if is_dm:
         await _isend_html(bot, message.chat.id, _global_unban_text(name_html))

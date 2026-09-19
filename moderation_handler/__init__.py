@@ -20,7 +20,7 @@ most of it reactively. Split across submodules by command family; common.py hold
 shared by more than one of them. Importing this package registers every command/callback handler
 on `router` as a side effect — see each submodule for its own command grid."""
 
-from .common import router, build_chat_permissions
+from .common import router, build_chat_permissions, scheduled_delete_task, invalidate_native_admins
 from .middleware import UserTrackingMiddleware, flush_messages_task, purge_old_messages_task
 from . import roles
 from . import reports
@@ -35,5 +35,7 @@ __all__ = [
     'UserTrackingMiddleware',
     'flush_messages_task',
     'purge_old_messages_task',
+    'scheduled_delete_task',
+    'invalidate_native_admins',
     'build_chat_permissions',
 ]
