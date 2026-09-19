@@ -62,6 +62,10 @@ COLLECT_CAPTCHA_IPS: bool = os.getenv('COLLECT_CAPTCHA_IPS', '0').strip().lower(
 # in the database, so a pending deletion survives a restart.
 SERVICE_REPLY_TTL: int = int(os.getenv('SERVICE_REPLY_TTL', '30'))
 
+# DM every owner (except the one who issued it) about each new global ban: who was banned, by
+# whom, from which chat, and the reason. Off by default.
+NOTIFY_OWNERS_GBAN: bool = os.getenv('NOTIFY_OWNERS_GBAN', '0').strip().lower() in ('1', 'true', 'yes', 'on')
+
 # Repeated-message antispam: mutes a user who posts the same content N times in a row within a
 # time window (configurable per chat via /admin). On by default. This requires the bot to look
 # at the content/media id of every message to detect duplicates — turn off if that's a concern.

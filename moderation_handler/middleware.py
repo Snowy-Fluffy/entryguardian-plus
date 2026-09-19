@@ -113,6 +113,10 @@ class UserTrackingMiddleware(BaseMiddleware):
             if _seen_cache.get(user.id) != entry:
                 db_man.remember_user(user.id, user.username, user.full_name)
                 _seen_cache[user.id] = entry
+            # Anyone who writes to the bot in private is a possible /broadcast DM recipient.
+            if event.chat and event.chat.type == 'private' and user.id not in _dm_seen:
+                db_man.remember_dm_user(user.id)
+                _dm_seen.add(user.id)
 
         text = event.text or ''
         if (
@@ -255,6 +259,9 @@ class UserTrackingMiddleware(BaseMiddleware):
                     return
         return await handler(event, data)
 
+
+_dm_seen: set[int] = set()
+"""User ids already written to dm_users this process lifetime — saves a DB write per DM message."""
 
 _PLAIN_USER_CMD_COOLDOWN = 10
 """Flat per-user command cooldown (seconds) for chat members with no role — moderators,

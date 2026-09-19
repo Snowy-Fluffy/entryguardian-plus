@@ -17,6 +17,7 @@
 from aiogram import types, Bot
 from aiogram.filters import Command, CommandObject
 import permissions
+import config
 from .common import (
     router, db_man, translator, _GROUP_TYPES,
     _delete_silently, _ianswer, _ianswer_html, _isend_html, _esc,
@@ -27,6 +28,30 @@ from .common import (
     _ban_target_or_reply, _punish_labels, _hierarchy_ok, _native_admin_ok, _get_target_or_reply,
     _dm_text, _dm_target,
 )
+
+
+async def _notify_owners_gban(bot: Bot, message: types.Message, target_label: str, reason: str) -> None:
+    """config.NOTIFY_OWNERS_GBAN: DM every owner except the issuer about a new global ban (user or
+    channel). Plain text — labels are already plain. Silent variants are reported too: 'silent'
+    is about the chats, not about the owners."""
+    if not config.NOTIFY_OWNERS_GBAN:
+        return
+    actor = message.from_user
+    where = (message.chat.title or str(message.chat.id)) if message.chat.type in _GROUP_TYPES \
+        else translator.get_string('gban_owner_notice_dm')
+    text = translator.get_string('gban_owner_notice').format(
+        target_label,
+        f'{_user_label(actor)} (id {actor.id})',
+        where,
+        reason or translator.get_string('gban_owner_notice_noreason'),
+    )
+    for owner_id in config.OWNERS:
+        if owner_id == actor.id:
+            continue
+        try:
+            await bot.send_message(owner_id, text)
+        except Exception:
+            pass
 
 
 async def _global_ban(bot: Bot, target_id: int) -> None:
@@ -109,6 +134,8 @@ async def _maybe_channel_ban(message: types.Message, command: CommandObject, bot
     # covers bot_chats ∪ {here} when glob); a local one only here.
     for log_chat in (chat_ids if glob else {message.chat.id}):
         _record_log(log_chat, message.from_user, log_key, title, reason, channel.id)
+    if glob:
+        await _notify_owners_gban(bot, message, f'{title} (id {channel.id})', reason)
     return True
 
 
@@ -196,6 +223,7 @@ async def gban(message: types.Message, command: CommandObject, bot: Bot) -> None
                 pass
     _clear_captcha_state_everywhere(target_id)
     _log_global(message, 'log_ban', banned, reason, target_id, everywhere=True)
+    await _notify_owners_gban(bot, message, banned, reason)
     if is_dm:
         await _isend_html(bot, message.chat.id, global_text)
         await _dm_target(bot, target_id, _dm_text('dm_banned_global_nosrc', '', message, reason))
@@ -261,6 +289,7 @@ async def sgban(message: types.Message, command: CommandObject, bot: Bot) -> Non
     banned_html, banned = await _punish_labels(bot, message, command, target_id)
     await _global_ban(bot, target_id)
     _log_global(message, 'log_sban', banned, reason, target_id, everywhere=True)
+    await _notify_owners_gban(bot, message, banned, reason)
     if is_dm:
         await _isend_html(bot, message.chat.id, _global_ban_text(banned_html, reason))
 

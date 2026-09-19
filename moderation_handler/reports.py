@@ -101,10 +101,13 @@ async def _origin_chat_line(bot: Bot, target_id: int) -> str | None:
     origin = db_man.get_captcha_origin(target_id)
     if origin is None:
         return None
-    chat_id, ts = origin
+    chat_id, ts, via = origin
     title = await _chat_title_or_none(bot, chat_id)
     when = datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M:%S')
-    return translator.get_string('punl_origin_chat').format(_esc(title) if title else '?', chat_id, when)
+    line = translator.get_string('punl_origin_chat').format(_esc(title) if title else '?', chat_id, when)
+    if via == 'reaction':
+        line += ' ' + translator.get_string('punl_origin_via_reaction')
+    return line
 
 
 def _global_block_line(target_id: int) -> str | None:

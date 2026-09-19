@@ -67,6 +67,7 @@ async def on_reaction(event: MessageReactionUpdated, bot: Bot):
         return
 
     db_man.remember_user(user.id, user.username, user.full_name)
+    db_man.record_captcha_origin(user.id, chat_id, via='reaction')   # first wins; no-op if already known
     user_id = user.id
 
     if permissions.is_owner(user_id):

@@ -119,8 +119,22 @@ class DBManager(UsersMixin, RolesMixin, BansMixin, MutesMixin, ChatSettingsMixin
 		if 'scheduled_deletes' not in tables:
 			self.cursor.execute('CREATE TABLE scheduled_deletes(chat_id INTEGER, message_id INTEGER, delete_at INTEGER, UNIQUE(chat_id, message_id))')
 			self.cursor.execute('CREATE INDEX idx_scheduled_deletes ON scheduled_deletes(delete_at)')
+		if 'dm_users' not in tables:
+			self.cursor.execute('CREATE TABLE dm_users(user_id INTEGER PRIMARY KEY, ts INTEGER)')
 		if 'captcha_ips' not in tables:
 			self.cursor.execute('CREATE TABLE captcha_ips(user_id INTEGER PRIMARY KEY, ip TEXT, user_agent TEXT, ts INTEGER)')
+		# When a global ban was issued. Older rows are backfilled from the staff log where possible.
+		for table, col in (('blocklist', 'user_id'), ('channel_blocklist', 'channel_id')):
+			cols = {row[1] for row in self.cursor.execute(f'PRAGMA table_info({table})').fetchall()}
+			if 'ts' not in cols:
+				self.cursor.execute(f'ALTER TABLE {table} ADD COLUMN ts INTEGER')
+				self.cursor.execute(
+					f'UPDATE {table} SET ts=(SELECT MAX(ts) FROM action_log WHERE action_log.target_id={table}.{col} '
+					f"AND action_log.action_key IN ('log_ban', 'log_sban')) WHERE ts IS NULL"
+				)
+		origin_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(captcha_origin)').fetchall()}
+		if 'via' not in origin_cols:
+			self.cursor.execute("ALTER TABLE captcha_origin ADD COLUMN via TEXT DEFAULT 'join'")
 		captcha_ip_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(captcha_ips)').fetchall()}
 		if 'user_agent' not in captcha_ip_cols:
 			self.cursor.execute('ALTER TABLE captcha_ips ADD COLUMN user_agent TEXT')

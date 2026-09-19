@@ -129,22 +129,42 @@ class UsersMixin:
 		self.connection.commit()
 		return now
 
-	def record_captcha_origin(self, user_id, chat_id):
-		"""Remember the chat a user was first put through the captcha in (the one whose join
-		posted their welcome). First chat only — INSERT OR IGNORE, never overwritten, like
-		captcha_ips — so it answers "where did this account originally come in through" even
-		after pending_chats has been cleared by verification."""
+	def record_captcha_origin(self, user_id, chat_id, via='join'):
+		"""Remember the chat the bot first saw this user come in through: `via='join'` is the
+		normal case (the join whose welcome put them through the captcha), `via='reaction'` is
+		a user first noticed by a reaction they left there. First chat only — INSERT OR IGNORE,
+		never overwritten, like captcha_ips — so it answers "where did this account originally
+		show up" even after pending_chats has been cleared by verification."""
 		self.cursor.execute(
-			'INSERT OR IGNORE INTO captcha_origin(user_id, chat_id, ts) VALUES (?, ?, ?)',
-			(user_id, chat_id, self.unix_time())
+			'INSERT OR IGNORE INTO captcha_origin(user_id, chat_id, ts, via) VALUES (?, ?, ?, ?)',
+			(user_id, chat_id, self.unix_time(), via)
 		)
 		self.connection.commit()
 
 	def get_captcha_origin(self, user_id):
-		"""(chat_id, ts) of the user's first captcha chat, or None if they never entered one
+		"""(chat_id, ts, via) of the user's origin chat, or None if they never showed up in one
 		(e.g. only ever /start-ed the bot directly in DM)."""
-		row = self.cursor.execute('SELECT chat_id, ts FROM captcha_origin WHERE user_id=?', (user_id,)).fetchone()
-		return (row[0], row[1]) if row else None
+		row = self.cursor.execute('SELECT chat_id, ts, via FROM captcha_origin WHERE user_id=?', (user_id,)).fetchone()
+		return (row[0], row[1], row[2] or 'join') if row else None
+
+	def remember_dm_user(self, user_id):
+		"""Record that this user has messaged the bot in private. A bot can't open a DM on its own,
+		so this table is the only possible audience for a DM broadcast (/broadcast); a user who
+		never wrote to the bot simply can't be reached."""
+		self.cursor.execute('INSERT OR IGNORE INTO dm_users(user_id, ts) VALUES (?, ?)', (user_id, self.unix_time()))
+		self.connection.commit()
+
+	def forget_dm_user(self, user_id):
+		"""Drop a DM recipient that turned out unreachable (blocked the bot, deleted account)."""
+		self.cursor.execute('DELETE FROM dm_users WHERE user_id=?', (user_id,))
+		self.connection.commit()
+
+	def get_dm_users(self):
+		"""Everyone known to have a private chat with the bot: dm_users, plus the captcha `user`
+		table as a seed — anyone in there typed a code (or failed to) in DM before dm_users existed."""
+		return [row[0] for row in self.cursor.execute(
+			'SELECT user_id FROM dm_users UNION SELECT id FROM user'
+		).fetchall()]
 
 	_USER_ID_LOOKUPS = (
 		('user', 'id'),

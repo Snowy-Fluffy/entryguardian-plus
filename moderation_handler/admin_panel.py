@@ -16,6 +16,7 @@
 
 from typing import Any
 from datetime import datetime
+import asyncio
 from aiogram import F, types, Bot
 from aiogram.filters import Command
 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
@@ -26,7 +27,7 @@ from .common import (
     _entity_name, _global_name, _resolve_username_token,
     _record_log, _human_time, _COOLDOWN_COMMANDS,
     _chat_perm_set, _perm_supported, _PERM_GROUPS, _PERM_ORDER,
-    _parse_duration,
+    _parse_duration, _spawn,
 )
 from .chat_admin import _leave_chat
 
@@ -35,6 +36,18 @@ _panel_state: dict[int, dict[str, Any]] = {}
 _log_search: dict[int, str] = {}
 
 _gban_search: dict[int, str] = {}
+
+_broadcast_pending: dict[int, dict[str, Any]] = {}
+"""owner id -> a composed broadcast awaiting the 'send' confirmation: target, source message
+(chat id + message id, copied to each recipient), and the resolved recipient lists."""
+
+_broadcast_running = False
+"""One broadcast at a time per process — a second one would double the send rate and race the
+progress edits."""
+
+_BROADCAST_TARGETS = ('all', 'chats', 'dms')
+_BROADCAST_SEND_DELAY = 0.05
+_BROADCAST_PROGRESS_EVERY = 25
 
 _LOG_PAGE_SIZE = 10
 
@@ -190,7 +203,10 @@ async def _build_gbans_page(bot: Bot, chat_id: int, page: int, query: str = '') 
     lines = [header, translator.get_string('log_page_info').format(page + 1, pages, len(items)), '']
     for kind, oid in chunk:
         icon = '📢' if kind == 'c' else '👤'
-        lines.append(f'{icon} {await _entity_name(bot, oid)}')
+        ts = db_man.get_channel_blocklist_ts(oid) if kind == 'c' else db_man.get_blocklist_ts(oid)
+        when = datetime.fromtimestamp(ts).strftime('%d.%m.%Y %H:%M') if ts \
+            else translator.get_string('gban_time_unknown')
+        lines.append(f'{icon} {await _entity_name(bot, oid)} — {when}')
 
     nav = []
     if page > 0:
@@ -650,6 +666,12 @@ async def admin_panel_input(message: types.Message, bot: Bot) -> None:
     state = _panel_state.get(user_id)
     if not state:
         return
+
+    if state['action'] == 'broadcast':
+        # No chat_id in this state — it's the owner's composed broadcast, any content type.
+        await _broadcast_compose(message, bot, state['target'])
+        return
+
     chat_id = state['chat_id']
 
     if not _can_access_chat(user_id, chat_id):
@@ -767,3 +789,186 @@ async def admin_panel_input(message: types.Message, bot: Bot) -> None:
     await message.answer(result)
     text, markup = await _build_chat_menu(bot, chat_id, user_id)
     await message.answer(text, reply_markup=markup)
+
+
+# ---------------------------------------------------------------------------
+# /broadcast — owner-only mass message: everyone / chats only / DMs only
+# ---------------------------------------------------------------------------
+
+def _broadcast_cancel_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=translator.get_string('broadcast_btn_cancel'), callback_data='bc:cancel'),
+    ]])
+
+
+def _broadcast_target_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=translator.get_string('broadcast_btn_all'), callback_data='bc:t:all')],
+        [InlineKeyboardButton(text=translator.get_string('broadcast_btn_chats'), callback_data='bc:t:chats')],
+        [InlineKeyboardButton(text=translator.get_string('broadcast_btn_dms'), callback_data='bc:t:dms')],
+        [InlineKeyboardButton(text=translator.get_string('broadcast_btn_cancel'), callback_data='bc:cancel')],
+    ])
+
+
+def _broadcast_confirm_markup() -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text=translator.get_string('broadcast_btn_send'), callback_data='bc:go'),
+        InlineKeyboardButton(text=translator.get_string('broadcast_btn_cancel'), callback_data='bc:cancel'),
+    ]])
+
+
+def _collect_broadcast_recipients(target: str, sender_id: int) -> tuple[list[int], list[int]]:
+    """(chat ids, user ids) for a broadcast target. Chats: every chat the bot has observed, minus
+    those the owner stopped the bot in. DMs: everyone known to have a private chat with the bot
+    (dm_users + the captcha table), minus the global blocklist and the sender themself. A bot
+    can't open a DM on its own, so users who never wrote to it are simply unreachable."""
+    chats: list[int] = []
+    users: list[int] = []
+    if target in ('all', 'chats'):
+        chats = [c for c in db_man.get_bot_chats() if not db_man.is_chat_stopped(c)]
+    if target in ('all', 'dms'):
+        users = [u for u in db_man.get_dm_users()
+                 if u != sender_id and not db_man.is_blocklisted(u)]
+    return chats, users
+
+
+@router.message(Command('broadcast'))
+async def broadcast_cmd(message: types.Message, bot: Bot) -> None:
+    """Owner-only, private-chat-only entry point (silently ignored elsewhere, like /uinfo):
+    pick the audience, then send the content, preview it, confirm."""
+    if message.chat.type != 'private':
+        return
+    user_id = message.from_user.id
+    if not permissions.is_owner(user_id):
+        return
+    _panel_state.pop(user_id, None)
+    _broadcast_pending.pop(user_id, None)
+    if _broadcast_running:
+        await message.answer(translator.get_string('broadcast_busy'))
+        return
+    await message.answer(translator.get_string('broadcast_choose_target'),
+                         reply_markup=_broadcast_target_markup())
+
+
+async def _broadcast_compose(message: types.Message, bot: Bot, target: str) -> None:
+    """The owner sent the content: resolve recipients, echo the message back as a preview
+    (copy_message — exactly what recipients will get) and ask for confirmation."""
+    user_id = message.from_user.id
+    _panel_state.pop(user_id, None)
+    chats, users = _collect_broadcast_recipients(target, user_id)
+    if not chats and not users:
+        await message.answer(translator.get_string('broadcast_nobody'))
+        return
+    try:
+        await bot.copy_message(user_id, message.chat.id, message.message_id)
+    except Exception:
+        pass
+    status = await message.answer(
+        translator.get_string('broadcast_preview').format(len(chats), len(users)),
+        reply_markup=_broadcast_confirm_markup(),
+    )
+    _broadcast_pending[user_id] = {
+        'target': target,
+        'src_chat': message.chat.id,
+        'src_msg': message.message_id,
+        'chats': chats,
+        'users': users,
+        'status_chat': status.chat.id,
+        'status_msg': status.message_id,
+    }
+
+
+async def _broadcast_send_one(bot: Bot, dest: int, src_chat: int, src_msg: int) -> bool:
+    """copy_message to one recipient; on Retry-After wait it out and retry once. Returns whether
+    it was delivered."""
+    try:
+        await bot.copy_message(dest, src_chat, src_msg)
+        return True
+    except Exception as e:
+        retry_after = float(getattr(e, 'retry_after', 0) or 0)
+        if retry_after > 0:
+            await asyncio.sleep(retry_after + 1)
+            try:
+                await bot.copy_message(dest, src_chat, src_msg)
+                return True
+            except Exception:
+                return False
+        # A user who blocked the bot / deleted their account is unreachable for good — stop
+        # counting them as a DM recipient. Group-side failures are just counted.
+        if dest > 0:
+            text = str(e).lower()
+            if 'blocked' in text or 'chat not found' in text or 'deactivated' in text:
+                db_man.forget_dm_user(dest)
+        return False
+
+
+async def _run_broadcast(bot: Bot, owner_id: int, pending: dict[str, Any]) -> None:
+    global _broadcast_running
+    _broadcast_running = True
+    recipients = list(pending['chats']) + list(pending['users'])
+    total = len(recipients)
+    sent = failed = 0
+
+    async def _progress(final: bool = False) -> None:
+        text = (translator.get_string('broadcast_done').format(sent, failed) if final
+                else translator.get_string('broadcast_progress').format(sent + failed, total))
+        try:
+            await bot.edit_message_text(text, chat_id=pending['status_chat'], message_id=pending['status_msg'])
+        except Exception:
+            pass
+
+    try:
+        await _progress()
+        for i, dest in enumerate(recipients, 1):
+            if await _broadcast_send_one(bot, dest, pending['src_chat'], pending['src_msg']):
+                sent += 1
+            else:
+                failed += 1
+            if i % _BROADCAST_PROGRESS_EVERY == 0:
+                await _progress()
+            await asyncio.sleep(_BROADCAST_SEND_DELAY)
+        await _progress(final=True)
+    finally:
+        _broadcast_running = False
+
+
+@router.callback_query(F.data.startswith('bc:'))
+async def broadcast_callback(callback: types.CallbackQuery, bot: Bot) -> None:
+    user_id = callback.from_user.id
+    if not permissions.is_owner(user_id):
+        await callback.answer(translator.get_string('admin_no_access'), show_alert=True)
+        return
+    parts = callback.data.split(':')
+    action = parts[1]
+
+    if action == 'cancel':
+        _panel_state.pop(user_id, None)
+        _broadcast_pending.pop(user_id, None)
+        await _edit(callback.message, translator.get_string('broadcast_cancelled'), None)
+        await callback.answer()
+        return
+
+    if action == 't':
+        target = parts[2] if len(parts) > 2 else ''
+        if target not in _BROADCAST_TARGETS:
+            await callback.answer()
+            return
+        _broadcast_pending.pop(user_id, None)
+        _panel_state[user_id] = {'action': 'broadcast', 'target': target}
+        await _edit(callback.message, translator.get_string('broadcast_send_content'), _broadcast_cancel_markup())
+        await callback.answer()
+        return
+
+    if action == 'go':
+        pending = _broadcast_pending.pop(user_id, None)
+        if pending is None:
+            await callback.answer()
+            return
+        if _broadcast_running:
+            await callback.answer(translator.get_string('broadcast_busy'), show_alert=True)
+            return
+        _spawn(_run_broadcast(bot, user_id, pending))
+        await callback.answer()
+        return
+
+    await callback.answer()

@@ -109,13 +109,17 @@ async def _require(message: types.Message, allowed: bool) -> bool:
 
 
 async def _require_global(message: types.Message) -> bool:
+    """Gate for the global punishment commands (gban/gmute and their reversals). In a group:
+    the chat's admins and owners. From DM: **owners only** — a chat admin's reach is their own
+    chats, and a global action from DM has no chat to scope it to, so it's reserved for owners
+    (a chat admin can still /gban from inside a group they administer)."""
     user_id = message.from_user.id
     if message.chat.type in _GROUP_TYPES:
         if permissions.can_manage_roles(db_man, message.chat.id, user_id):
             return True
         await _deny(message)
         return False
-    if permissions.is_owner(user_id) or db_man.get_admin_chats(user_id):
+    if permissions.is_owner(user_id):
         return True
     await message.answer(translator.get_string('mod_no_permission'))
     return False

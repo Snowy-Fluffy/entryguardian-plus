@@ -1,7 +1,15 @@
 class BansMixin:
 	def add_to_blocklist(self, user_id):
-		self.cursor.execute('INSERT OR IGNORE INTO blocklist(user_id) VALUES (?)', (user_id,))
+		"""Global ban. The timestamp is the *first* time this ban was issued: a repeated /gban of
+		someone already listed keeps the original date (an /ungban deletes the row, so a later
+		re-ban starts fresh)."""
+		self.cursor.execute('INSERT OR IGNORE INTO blocklist(user_id, ts) VALUES (?, ?)', (user_id, self.unix_time()))
 		self.connection.commit()
+
+	def get_blocklist_ts(self, user_id):
+		"""When the user was globally banned, or None for a pre-timestamp row nothing could backfill."""
+		row = self.cursor.execute('SELECT ts FROM blocklist WHERE user_id=?', (user_id,)).fetchone()
+		return row[0] if row else None
 
 	def remove_from_blocklist(self, user_id):
 		self.cursor.execute('DELETE FROM blocklist WHERE user_id=?', (user_id,))
@@ -47,8 +55,12 @@ class BansMixin:
 		self.connection.commit()
 
 	def add_channel_to_blocklist(self, channel_id):
-		self.cursor.execute('INSERT OR IGNORE INTO channel_blocklist(channel_id) VALUES (?)', (channel_id,))
+		self.cursor.execute('INSERT OR IGNORE INTO channel_blocklist(channel_id, ts) VALUES (?, ?)', (channel_id, self.unix_time()))
 		self.connection.commit()
+
+	def get_channel_blocklist_ts(self, channel_id):
+		row = self.cursor.execute('SELECT ts FROM channel_blocklist WHERE channel_id=?', (channel_id,)).fetchone()
+		return row[0] if row else None
 
 	def remove_channel_from_blocklist(self, channel_id):
 		self.cursor.execute('DELETE FROM channel_blocklist WHERE channel_id=?', (channel_id,))
