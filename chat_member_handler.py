@@ -165,10 +165,13 @@ async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
             await _flood_safe(lambda: bot.restrict_chat_member(chat_id=chat_id, user_id=user_id, permissions=_MUTED))
         except Exception:
             log.warning('could not restrict new member %s in chat %s', user_id, chat_id, exc_info=True)
+    # welcome_within reads pending_chats.since, which add_pending_chat sets to "now" — so decide
+    # about the greeting *before* recording the pending row, or it would always look recent.
+    greet = not db_man.welcome_within(chat_id, user_id, _WELCOME_COOLDOWN)
     db_man.record_captcha_origin(user_id, chat_id)
     db_man.add_pending_chat(user_id, chat_id)
 
-    if db_man.welcome_within(chat_id, user_id, _WELCOME_COOLDOWN):
+    if not greet:
         return
 
     user_name = html.escape(user.full_name, quote=False)
