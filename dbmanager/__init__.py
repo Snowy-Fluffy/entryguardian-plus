@@ -91,6 +91,8 @@ class DBManager(UsersMixin, RolesMixin, BansMixin, MutesMixin, ChatSettingsMixin
 			self.cursor.execute('CREATE TABLE channel_ban_exceptions(chat_id INTEGER, channel_id INTEGER, UNIQUE(chat_id, channel_id))')
 		if 'channels_banned' not in tables:
 			self.cursor.execute('CREATE TABLE channels_banned(chat_id INTEGER PRIMARY KEY)')
+		if 'block_bots' not in tables:
+			self.cursor.execute('CREATE TABLE block_bots(chat_id INTEGER PRIMARY KEY)')
 		if 'chat_perms' not in tables:
 			self.cursor.execute('CREATE TABLE chat_perms(chat_id INTEGER PRIMARY KEY, perms TEXT)')
 		if 'antispam_settings' not in tables:

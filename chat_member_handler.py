@@ -30,7 +30,10 @@ from translator import Translator
 from moderation_handler import invalidate_native_admins, build_chat_permissions
 # Shared with the moderation package on purpose: the same Retry-After wrapper and the same
 # raid-reminder registry (so /raid_off can delete the last reminder this task posted).
-from moderation_handler.common import _flood_safe, _raid_reminder_msg
+from moderation_handler.common import (
+    _flood_safe, _raid_reminder_msg, _is_native_admin, _isend_html, _user_mention, _user_label,
+)
+import permissions
 
 router = Router()
 db_man = DBManager()
@@ -58,6 +61,42 @@ async def delete_welcome_msg(bot: Bot, user_id: int, chat_id: int | None = None)
             pass
 
 
+async def _inviter_privileged(event: ChatMemberUpdated, bot: Bot) -> bool:
+    """Whether whoever performed this chat_member change (event.from_user — the inviter, for an
+    added bot) may bring bots in: bot owners/staff of the chat, or a Telegram-native admin
+    (cached admin list). An unknown/absent actor counts as unprivileged."""
+    actor = event.from_user
+    if actor is None or actor.id == event.new_chat_member.user.id:
+        return False
+    if permissions.is_staff(db_man, event.chat.id, actor.id):
+        return True
+    return await _is_native_admin(bot, event.chat.id, actor.id)
+
+
+async def _block_invited_bot(event: ChatMemberUpdated, bot: Bot) -> None:
+    target = event.new_chat_member.user
+    chat_id = event.chat.id
+    try:
+        await _flood_safe(lambda: bot.ban_chat_member(chat_id, target.id))
+    except Exception:
+        log.warning('could not ban invited bot %s in chat %s', target.id, chat_id, exc_info=True)
+        return
+    inviter = event.from_user
+    inviter_html = _user_mention(inviter.id, _user_label(inviter)) if inviter else '?'
+    inviter_plain = f'{_user_label(inviter)} (id {inviter.id})' if inviter else '?'
+    try:
+        await _isend_html(bot, chat_id, translator.get_string('bot_blocked_announce').format(
+            _user_mention(target.id, _user_label(target)), inviter_html))
+    except Exception:
+        pass
+    db_man.add_log(
+        chat_id,
+        f'🤖 {translator.get_string("log_bot_blocked")} → {_user_label(target)} (id {target.id}) | '
+        f'{translator.get_string("log_bot_blocked_by").format(inviter_plain)}',
+        target.id, 'log_bot_blocked',
+    )
+
+
 @router.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
 async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
     """A member joined. Order matters: anything that must *stop* them (ban, mute, captcha
@@ -68,7 +107,12 @@ async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
     chat_id = event.chat.id
 
     if user.is_bot:
-        return   # another bot added by an admin — not a captcha subject
+        # Another bot — never a captcha subject. With "block invited bots" on, a bot brought in
+        # by a plain member is banned on the spot; one added by a Telegram admin or bot staff
+        # is assumed deliberate and left alone.
+        if db_man.is_block_bots(chat_id) and not await _inviter_privileged(event, bot):
+            await _block_invited_bot(event, bot)
+        return
 
     db_man.remember_user(user_id, user.username, user.full_name)
     db_man.remember_chat(chat_id)

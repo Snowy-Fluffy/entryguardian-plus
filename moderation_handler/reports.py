@@ -86,7 +86,7 @@ _PUNISH_LOG_KEYS = {
     'log_unban', 'log_ungban', 'log_unsban', 'log_unsgban',
     'log_mute', 'log_gmute', 'log_smute', 'log_gsmute',
     'log_unmute', 'log_unsmute', 'log_ungmute', 'log_ungsmute',
-    'log_delete',
+    'log_delete', 'log_bot_blocked',
 }
 _PUNL_MAX = 40
 

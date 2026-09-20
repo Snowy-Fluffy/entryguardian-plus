@@ -123,6 +123,12 @@ async def _build_chat_menu(bot: Bot, chat_id: int, user_id: int) -> tuple[str, I
         )],
         [InlineKeyboardButton(
             text=translator.get_string(
+                'admin_btn_bots_on' if db_man.is_block_bots(chat_id) else 'admin_btn_bots_off'
+            ),
+            callback_data=f'adm:bots:{chat_id}',
+        )],
+        [InlineKeyboardButton(
+            text=translator.get_string(
                 'admin_btn_kick_on' if db_man.is_kick_enabled(chat_id) else 'admin_btn_kick_off'
             ),
             callback_data=f'adm:kick:{chat_id}',
@@ -464,6 +470,13 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
             await _clear_raid_reminder(bot, chat_id)
         _record_log(chat_id, callback.from_user, 'log_raid',
                     translator.get_string('raid_state_on' if new_state else 'raid_state_off'))
+        text, markup = await _build_chat_menu(bot, chat_id, user_id)
+        await _edit(callback.message, text, markup)
+    elif action == 'bots':
+        new_state = not db_man.is_block_bots(chat_id)
+        db_man.set_block_bots(chat_id, new_state)
+        _record_log(chat_id, callback.from_user, 'log_block_bots',
+                    translator.get_string('bots_state_on' if new_state else 'bots_state_off'))
         text, markup = await _build_chat_menu(bot, chat_id, user_id)
         await _edit(callback.message, text, markup)
     elif action == 'chan':

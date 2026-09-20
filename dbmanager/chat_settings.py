@@ -178,3 +178,14 @@ class ChatSettingsMixin:
 
 	def get_command_banned(self):
 		return [row[0] for row in self.cursor.execute('SELECT user_id FROM command_banned').fetchall()]
+
+	def set_block_bots(self, chat_id, enabled):
+		"""Per-chat toggle: ban any bot added to the chat by a non-privileged member."""
+		if enabled:
+			self.cursor.execute('INSERT OR IGNORE INTO block_bots(chat_id) VALUES (?)', (chat_id,))
+		else:
+			self.cursor.execute('DELETE FROM block_bots WHERE chat_id=?', (chat_id,))
+		self.connection.commit()
+
+	def is_block_bots(self, chat_id):
+		return bool(self.cursor.execute('SELECT 1 FROM block_bots WHERE chat_id=?', (chat_id,)).fetchone())
