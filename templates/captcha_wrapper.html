@@ -442,6 +442,13 @@
                 return;
             }
 
+            // Mario: the flagpole /kill was rejected (stale challenge, rate limit) — the game
+            // can't finish, tell the user instead of freezing.
+            if (e.data.event === 'levelFailed') {
+                showError(captchaText.web_error_game, true);
+                return;
+            }
+
             // Doom (type=doom_complete) or Mario (event=levelComplete)
             var isDoom = (e.data.type === 'doom_complete');
             var isMario = (e.data.event === 'levelComplete');
@@ -473,6 +480,8 @@
             showResult();
         } else if (initialState === 'error') {
             showError(captchaText.web_error_expired, false);
+        } else if (initialState === 'ratelimit') {
+            showError(captchaText.web_error_ratelimit, true);
         } else {
             setStep('game');
             show('stage-intro');

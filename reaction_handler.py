@@ -23,7 +23,7 @@ import permissions
 # Imported straight from the package's shared module (not re-exported via moderation_handler/__init__):
 # these are the same helpers the message middleware uses for the equivalent checks, so the two
 # enforcement paths can't drift apart.
-from moderation_handler.common import _isend, _clear_captcha_state, translator
+from moderation_handler.common import _isend, _clear_captcha_state, translator, _PSEUDO_IDS
 
 router = Router()
 db_man = DBManager()
@@ -81,11 +81,26 @@ async def on_reaction(event: MessageReactionUpdated, bot: Bot):
             pass
         return
 
-    if chat_id not in db_man.get_pending_chats(user_id):
+    if chat_id in _PSEUDO_IDS or user_id in _PSEUDO_IDS:
+        return
+    if chat_id not in db_man.get_pending_chats(user_id) or db_man.is_user_allowed(user_id):
         return
 
-    banned_until = int(datetime.now().timestamp()) + config.COOL_DOWN
+    # Reacting while still unverified = a temporary kick (bots react; humans get told why).
+    # Telegram treats a ban shorter than 30 s as permanent, hence the floor.
+    banned_until = int(datetime.now().timestamp()) + max(config.COOL_DOWN, 60)
     try:
         await bot.ban_chat_member(chat_id=chat_id, user_id=user_id, until_date=banned_until)
+    except Exception:
+        return
+    db_man.remove_pending_chat(user_id, chat_id)
+    db_man.remove_pending_unban(chat_id, user_id)
+    for cid, mid in db_man.pop_welcomes_for_user(user_id, chat_id):
+        try:
+            await bot.delete_message(cid, mid)
+        except Exception:
+            pass
+    try:
+        await bot.send_message(user_id, translator.get_string('reaction_ban_notice').format(max(config.COOL_DOWN, 60) // 60))
     except Exception:
         pass

@@ -24,7 +24,7 @@ from .common import (
     _require, _require_global, _cooldown_guard, _cooldown_mark,
     _reply_channel, _actor_role_word, _actor_mention,
     _parse_ban, _parse_duration, _human_duration_words,
-    _is_bot_target, _hierarchy_ok, _native_admin_ok, _punish_labels,
+    _is_bot_target, _hierarchy_ok, _native_admin_ok, _punish_labels, _TargetRefused, _refuse,
     _dm_text, _dm_target, _log_global,
     _MUTED_PERMS, build_chat_permissions,
 )
@@ -42,10 +42,15 @@ async def _parse_mute(message: types.Message, command: CommandObject, bot: Bot) 
     return target_id, dur_seconds, dur_text, reason
 
 
-async def _apply_mute(bot: Bot, chat_id: int, user_id: int, dur_seconds: int | None) -> None:
+async def _apply_mute(bot: Bot, chat_id: int, user_id: int, dur_seconds: int | None, *, record_local: bool = True) -> None:
+    """Restrict in one chat. record_local=True also writes the chat's own `mutes` row (a local
+    /mute); a global mute passes False — its record is the single `global_mutes` row, and
+    effective_mute() applies it per chat. Keeping global mutes out of `mutes` is what lets a
+    local mute be told apart from a global one later (/ungmute must not lift the former)."""
     until = int(datetime.now().timestamp()) + dur_seconds if dur_seconds else 0
     await bot.restrict_chat_member(chat_id, user_id, permissions=_MUTED_PERMS, until_date=until or None)
-    db_man.add_mute(chat_id, user_id, until)
+    if record_local:
+        db_man.add_mute(chat_id, user_id, until)
 
 
 async def _apply_unmute(bot: Bot, chat_id: int, user_id: int) -> None:
@@ -95,13 +100,17 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
     if _reply_channel(message) is not None:
         await _ianswer(message, translator.get_string('cannot_mute_channel'))
         return False
-    target_id, dur_seconds, dur_text, reason = await _parse_mute(message, command, bot)
+    try:
+        target_id, dur_seconds, dur_text, reason = await _parse_mute(message, command, bot)
+    except _TargetRefused as e:
+        await _refuse(message, e)
+        return False
     if target_id is None:
         provided = bool(message.reply_to_message) or bool((command.args or '').strip())
         await _ianswer(message, translator.get_string('mod_user_not_found' if provided else 'mod_specify_user'))
         return False
     if dur_text.endswith('s'):
-        await _ianswer(message, translator.get_string('mute_failed'))
+        await _ianswer(message, translator.get_string('mute_min_duration'))
         return False
     if await _is_bot_target(message, bot, target_id):
         return False
@@ -110,7 +119,7 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
         return False
     if not await _hierarchy_ok(message, target_id):
         return False
-    if not await _native_admin_ok(message, bot, target_id):
+    if not await _native_admin_ok(message, bot, target_id, everywhere=glob):
         return False
 
     muted_html, muted = await _punish_labels(bot, message, command, target_id)
@@ -129,10 +138,10 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
             chat_ids.add(message.chat.id)
         for chat_id in chat_ids:
             try:
-                await _apply_mute(bot, chat_id, target_id, dur_seconds)
+                await _apply_mute(bot, chat_id, target_id, dur_seconds, record_local=False)
             except Exception:
                 pass
-            if not silent and db_man.is_gpunish_announce_enabled(chat_id):
+            if not silent and (chat_id == message.chat.id or db_man.is_gpunish_announce_enabled(chat_id)):
                 try:
                     await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
                 except Exception:
@@ -164,7 +173,11 @@ async def _run_unmute(message: types.Message, command: CommandObject, bot: Bot, 
     if _reply_channel(message) is not None:
         await _ianswer(message, translator.get_string('cannot_mute_channel'))
         return False
-    target_id, reason = await _parse_ban(message, command, bot)
+    try:
+        target_id, reason = await _parse_ban(message, command, bot)
+    except _TargetRefused as e:
+        await _refuse(message, e)
+        return False
     if target_id is None:
         provided = bool(message.reply_to_message) or bool((command.args or '').strip())
         await _ianswer(message, translator.get_string('mod_user_not_found' if provided else 'mod_specify_user'))
@@ -185,11 +198,14 @@ async def _run_unmute(message: types.Message, command: CommandObject, bot: Bot, 
         if not is_dm:
             chat_ids.add(message.chat.id)
         for chat_id in chat_ids:
+            # A global amnesty lifts the *global* mute only — a chat's own local /mute stays.
+            if db_man.is_muted(chat_id, target_id):
+                continue
             try:
                 await _apply_unmute(bot, chat_id, target_id)
             except Exception:
                 pass
-            if not silent and db_man.is_gpunish_announce_enabled(chat_id):
+            if not silent and (chat_id == message.chat.id or db_man.is_gpunish_announce_enabled(chat_id)):
                 try:
                     await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
                 except Exception:

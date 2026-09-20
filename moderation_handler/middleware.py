@@ -28,10 +28,11 @@ from .common import (
     router, db_man, translator, _GROUP_TYPES, _spawn,
     _seen_cache, _isend, _isend_html, _identity_html, _full_user_info, _chat_info,
     _channel_mention, _message_link, _report_recipients, _human_elapsed, _seconds_to_words,
-    _clear_captcha_state, _MUTED_PERMS, _is_native_admin,
+    _clear_captcha_state, _MUTED_PERMS, _is_native_admin, _PSEUDO_IDS, _flood_safe,
 )
 
 _MESSAGE_RETENTION = 2 * 24 * 3600
+_SWEEP_THROTTLE = 0.1
 _MESSAGE_FLUSH_INTERVAL = 10
 _MESSAGE_PURGE_INTERVAL = 1800
 
@@ -66,19 +67,21 @@ async def _sweep_blocklist_chat(bot: Bot, chat_id: int) -> int:
         if db_man.is_ban_exception(chat_id, user_id):
             continue
         try:
-            await bot.ban_chat_member(chat_id, user_id)
+            await _flood_safe(lambda: bot.ban_chat_member(chat_id, user_id))
             banned_count += 1
             _clear_captcha_state(chat_id, user_id)
         except Exception:
             pass
+        await asyncio.sleep(_SWEEP_THROTTLE)
     for channel_id in db_man.get_channel_blocklist():
         if db_man.is_channel_ban_exception(chat_id, channel_id):
             continue
         try:
-            await bot.ban_chat_sender_chat(chat_id, channel_id)
+            await _flood_safe(lambda: bot.ban_chat_sender_chat(chat_id, channel_id))
             banned_count += 1
         except Exception:
             pass
+        await asyncio.sleep(_SWEEP_THROTTLE)
     return banned_count
 
 
@@ -118,7 +121,12 @@ class UserTrackingMiddleware(BaseMiddleware):
                 db_man.remember_dm_user(user.id)
                 _dm_seen.add(user.id)
 
+        # A command that must not reach a handler (command-banned sender, or a plain member
+        # inside the flat cooldown) is only *dropped* — flagged here and cut off right before
+        # the handler — so the enforcement below (blocklist, mutes, unicode guard, tracking)
+        # still runs on it: a muted user's '/anything' must still be deleted.
         text = event.text or ''
+        drop_command = False
         if (
             text.startswith('/')
             and not is_edit
@@ -128,10 +136,11 @@ class UserTrackingMiddleware(BaseMiddleware):
         ):
             cmd = text[1:].split(maxsplit=1)[0].split('@')[0].lower()
             if cmd != 'start':
-                return
+                drop_command = True
 
         if (
-            text.startswith('/')
+            not drop_command
+            and text.startswith('/')
             and not is_edit
             and user
             and event.chat
@@ -140,8 +149,9 @@ class UserTrackingMiddleware(BaseMiddleware):
         ):
             remaining = db_man.cooldown_remaining(event.chat.id, user.id, _PLAIN_USER_CMD_KEY, _PLAIN_USER_CMD_COOLDOWN)
             if remaining > 0:
-                return
-            db_man.record_cooldown_use(event.chat.id, user.id, _PLAIN_USER_CMD_KEY)
+                drop_command = True
+            else:
+                db_man.record_cooldown_use(event.chat.id, user.id, _PLAIN_USER_CMD_KEY)
 
         if event.chat and event.chat.type in _GROUP_TYPES:
             if (
@@ -163,9 +173,12 @@ class UserTrackingMiddleware(BaseMiddleware):
                 db_man.log_channel_message(event.chat.id, event.sender_chat.id, event.message_id, db_man.unix_time())
             elif user:
                 db_man.log_message(event.chat.id, user.id, event.message_id, db_man.unix_time())
+            # from_user of a channel post / anonymous-admin post is a shared pseudo-account —
+            # never enforce a *user* punishment on it (channel bans are handled below by sender_chat).
+            enforce_user = user is not None and user.id not in _PSEUDO_IDS and not permissions.is_owner(user.id)
+
             if (
-                user
-                and not permissions.is_owner(user.id)
+                enforce_user
                 and db_man.is_blocklisted(user.id)
                 and not db_man.is_ban_exception(event.chat.id, user.id)
             ):
@@ -180,11 +193,7 @@ class UserTrackingMiddleware(BaseMiddleware):
                     pass
                 return
 
-            if (
-                user
-                and not permissions.is_owner(user.id)
-                and db_man.is_locally_banned(event.chat.id, user.id)
-            ):
+            if enforce_user and db_man.is_locally_banned(event.chat.id, user.id):
                 try:
                     await event.bot.ban_chat_member(event.chat.id, user.id)
                     _clear_captcha_state(event.chat.id, user.id)
@@ -196,7 +205,7 @@ class UserTrackingMiddleware(BaseMiddleware):
                     pass
                 return
 
-            if user and not permissions.is_owner(user.id):
+            if enforce_user:
                 muted, until = db_man.effective_mute(event.chat.id, user.id)
                 if muted:
                     try:
@@ -212,6 +221,26 @@ class UserTrackingMiddleware(BaseMiddleware):
                     except Exception:
                         pass
                     return
+
+            # Captcha safety net: someone still pending here (never verified) must not be able
+            # to post — covers the join-time window before the restriction lands, a restriction
+            # lifted out-of-band (an expired timed mute, a manual unmute) and a bot restart.
+            if (
+                enforce_user
+                and not is_edit
+                and db_man.is_captcha_enabled(event.chat.id)
+                and not db_man.is_user_allowed(user.id)
+                and event.chat.id in db_man.get_pending_chats(user.id)
+            ):
+                try:
+                    await event.delete()
+                except Exception:
+                    pass
+                try:
+                    await event.bot.restrict_chat_member(event.chat.id, user.id, permissions=_MUTED_PERMS)
+                except Exception:
+                    pass
+                return
 
             await _check_antispam(event, user, is_edit)
 
@@ -252,11 +281,12 @@ class UserTrackingMiddleware(BaseMiddleware):
                     pass
                 return
 
-            text = event.text or ''
             if text.startswith('/') and not is_edit and db_man.is_chat_stopped(event.chat.id):
                 cmd = text[1:].split(maxsplit=1)[0].split('@')[0].lower()
                 if not (cmd in ('startchat', 'stopchat') and user and permissions.is_owner(user.id)):
                     return
+        if drop_command:
+            return
         return await handler(event, data)
 
 
@@ -284,7 +314,6 @@ _LOOKALIKE_SCRIPT_RANGES = (
     (0x1D00, 0x1D7F),    # Phonetic Extensions (small-caps lookalikes, e.g. ᴀᴋᴧʙ)
     (0x1D80, 0x1DBF),    # Phonetic Extensions Supplement
     (0x2100, 0x214F),    # Letterlike Symbols (ℵ ℶ ℷ etc.)
-    (0x2460, 0x24FF),    # Enclosed Alphanumerics (circled letters/digits)
     (0x1D400, 0x1D7FF),  # Mathematical Alphanumeric Symbols (bold/italic/fraktur/double-struck)
 )
 
@@ -297,8 +326,9 @@ account/care-of... Without this list a plain "№" would get the message deleted
 
 def _has_lookalike_script(text: str) -> bool:
     """True if text contains a character from a block that's essentially never handwritten in
-    genuine chat — Cherokee, phonetic/mathematical letter-lookalikes, letterlike symbols,
-    circled letters — but is exactly what 'fancy text' generators and homoglyph word-filter
+    genuine chat — Cherokee, phonetic/mathematical letter-lookalikes, letterlike symbols
+    (circled digits/letters are deliberately *not* here: ①②③ list numbering is common in real
+    chats) — but is exactly what 'fancy text' generators and homoglyph word-filter
     evasion draw from (e.g. swapping a Cyrillic О for a visually identical Cherokee letter).
     Deliberately broader than 'mixed with normal text' — flags outright, so a message built
     entirely from these (as spam sometimes is) is still caught. _LOOKALIKE_EXEMPT carves the

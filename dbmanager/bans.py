@@ -94,11 +94,24 @@ class BansMixin:
 		return bool(self.cursor.execute('SELECT 1 FROM channels_banned WHERE chat_id=?', (chat_id,)).fetchone())
 
 	def add_pending_unban(self, chat_id, user_id, next_ts):
+		"""Queue (or re-queue) the unban half of a 24h kick. Resets the attempt counter — this is
+		a fresh obligation, not a retry."""
 		self.cursor.execute(
-			'INSERT OR REPLACE INTO pending_unbans(chat_id, user_id, next_ts) VALUES (?, ?, ?)',
+			'INSERT OR REPLACE INTO pending_unbans(chat_id, user_id, next_ts, attempts) VALUES (?, ?, ?, 0)',
 			(chat_id, user_id, next_ts)
 		)
 		self.connection.commit()
+
+	def defer_pending_unban(self, chat_id, user_id, next_ts):
+		"""A failed unban attempt: push the deadline and bump the counter. Returns the new
+		attempt count so the caller can give up past a limit."""
+		self.cursor.execute(
+			'UPDATE pending_unbans SET next_ts=?, attempts=COALESCE(attempts, 0)+1 WHERE chat_id=? AND user_id=?',
+			(next_ts, chat_id, user_id)
+		)
+		self.connection.commit()
+		row = self.cursor.execute('SELECT attempts FROM pending_unbans WHERE chat_id=? AND user_id=?', (chat_id, user_id)).fetchone()
+		return row[0] if row else 0
 
 	def remove_all_pending_unbans(self, user_id):
 		self.cursor.execute('DELETE FROM pending_unbans WHERE user_id=?', (user_id,))
@@ -110,5 +123,5 @@ class BansMixin:
 
 	def get_due_unbans(self, now):
 		return self.cursor.execute(
-			'SELECT chat_id, user_id FROM pending_unbans WHERE next_ts <= ?', (now,)
+			'SELECT chat_id, user_id, COALESCE(attempts, 0) FROM pending_unbans WHERE next_ts <= ?', (now,)
 		).fetchall()

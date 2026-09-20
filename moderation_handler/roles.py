@@ -92,6 +92,10 @@ async def add_moderator(message: types.Message, command: CommandObject, bot: Bot
     if db_man.is_moderator(message.chat.id, target_id):
         await _ianswer_html(message, translator.get_string('already_mod').format(name_html))
         return
+    if db_man.is_admin(message.chat.id, target_id):
+        # Would silently demote them (set_role overwrites) and log it as "moderator added".
+        await _ianswer_html(message, translator.get_string('already_admin_use_del').format(name_html))
+        return
     db_man.set_role(message.chat.id, target_id, 'moderator')
     _log_action(message, 'log_add_mod', name)
     await _ianswer_html(message, translator.get_string('mod_added').format(name_html))
@@ -171,4 +175,5 @@ async def help_command(message: types.Message) -> None:
         parts.append(translator.get_string('help_mod'))
     parts.append(translator.get_string('help_everyone'))
     sent = await message.answer('\n\n'.join(parts))
-    _schedule_delete(message.chat.id, sent.message_id, 60)
+    if _service_ttl(message.chat, 60):   # groups only — nothing is auto-deleted in DM
+        _schedule_delete(message.chat.id, sent.message_id, 60)

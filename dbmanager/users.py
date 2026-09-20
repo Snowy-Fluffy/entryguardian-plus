@@ -147,6 +147,35 @@ class UsersMixin:
 		row = self.cursor.execute('SELECT chat_id, ts, via FROM captcha_origin WHERE user_id=?', (user_id,)).fetchone()
 		return (row[0], row[1], row[2] or 'join') if row else None
 
+	def set_welcome(self, chat_id, user_id, message_id):
+		"""Remember the welcome/captcha prompt posted for a user in a chat, so it can be deleted
+		once they verify (or are kicked) — persisted, so a restart doesn't orphan it."""
+		self.cursor.execute(
+			'INSERT INTO welcome_msgs(chat_id, user_id, message_id) VALUES (?, ?, ?) '
+			'ON CONFLICT(chat_id, user_id) DO UPDATE SET message_id=excluded.message_id',
+			(chat_id, user_id, message_id)
+		)
+		self.connection.commit()
+
+	def pop_welcomes_for_user(self, user_id, chat_id=None):
+		"""Remove and return [(chat_id, message_id)] of a user's welcome prompts — all chats, or
+		one chat if chat_id is given."""
+		if chat_id is None:
+			rows = self.cursor.execute('SELECT chat_id, message_id FROM welcome_msgs WHERE user_id=?', (user_id,)).fetchall()
+			self.cursor.execute('DELETE FROM welcome_msgs WHERE user_id=?', (user_id,))
+		else:
+			rows = self.cursor.execute('SELECT chat_id, message_id FROM welcome_msgs WHERE user_id=? AND chat_id=?', (user_id, chat_id)).fetchall()
+			self.cursor.execute('DELETE FROM welcome_msgs WHERE user_id=? AND chat_id=?', (user_id, chat_id))
+		self.connection.commit()
+		return rows
+
+	def pop_welcomes_in_chat(self, chat_id):
+		"""Remove and return [message_id] of every welcome prompt currently up in a chat."""
+		rows = self.cursor.execute('SELECT message_id FROM welcome_msgs WHERE chat_id=?', (chat_id,)).fetchall()
+		self.cursor.execute('DELETE FROM welcome_msgs WHERE chat_id=?', (chat_id,))
+		self.connection.commit()
+		return [r[0] for r in rows]
+
 	def remember_dm_user(self, user_id):
 		"""Record that this user has messaged the bot in private. A bot can't open a DM on its own,
 		so this table is the only possible audience for a DM broadcast (/broadcast); a user who

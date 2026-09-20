@@ -6,11 +6,15 @@ class MessageLogMixin:
 		if not self._msg_buffer:
 			return
 		buffer, self._msg_buffer = self._msg_buffer, []
-		self.cursor.executemany(
-			'INSERT INTO recent_messages(chat_id, user_id, message_id, ts) VALUES (?, ?, ?, ?)',
-			buffer
-		)
-		self.connection.commit()
+		try:
+			self.cursor.executemany(
+				'INSERT INTO recent_messages(chat_id, user_id, message_id, ts) VALUES (?, ?, ?, ?)',
+				buffer
+			)
+			self.connection.commit()
+		except Exception:
+			self._msg_buffer = buffer + self._msg_buffer   # keep the batch for the next flush
+			raise
 
 	def purge_old_messages(self, cutoff):
 		self.cursor.execute('DELETE FROM recent_messages WHERE ts < ?', (cutoff,))
@@ -42,11 +46,15 @@ class MessageLogMixin:
 		if not self._channel_msg_buffer:
 			return
 		buffer, self._channel_msg_buffer = self._channel_msg_buffer, []
-		self.cursor.executemany(
-			'INSERT INTO recent_channel_messages(chat_id, channel_id, message_id, ts) VALUES (?, ?, ?, ?)',
-			buffer
-		)
-		self.connection.commit()
+		try:
+			self.cursor.executemany(
+				'INSERT INTO recent_channel_messages(chat_id, channel_id, message_id, ts) VALUES (?, ?, ?, ?)',
+				buffer
+			)
+			self.connection.commit()
+		except Exception:
+			self._channel_msg_buffer = buffer + self._channel_msg_buffer
+			raise
 
 	def purge_old_channel_messages(self, cutoff):
 		self.cursor.execute('DELETE FROM recent_channel_messages WHERE ts < ?', (cutoff,))

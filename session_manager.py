@@ -17,12 +17,13 @@
 import time
 import uuid as uuid_module
 import secrets
-import string
 import config
 
 sessions: dict[str, dict] = {}
 
-_CODE_CHARS = string.ascii_uppercase + string.digits
+_CODE_CHARS = 'ACDEFGHJKMNPQRTUVWXYZ234679'
+"""No 0/O, 1/I/L, 5/S, 8/B: on the distorted captcha image those pairs are the main source of
+honest wrong-code attempts (and, after three of them, a 15-minute temp block)."""
 _CODE_LEN = 6
 
 
@@ -45,6 +46,7 @@ def create_session(user_id: int, captcha_type: str = 'doom') -> str:
         'game_passed': False,
         'turnstile_passed': False,
         'altcha_passed': False,
+        'altcha_challenge': None,
     }
     return session_id
 
@@ -64,6 +66,7 @@ def set_page_loaded(session_id: str) -> str | None:
     session['game_passed'] = False
     session['turnstile_passed'] = False
     session['altcha_passed'] = False
+    session['altcha_challenge'] = None
     return challenge
 
 
@@ -79,6 +82,14 @@ def get_pending_session(user_id: int) -> str | None:
         if (session['user_id'] == user_id
                 and not session['completed']
                 and not is_expired(session_id)):
+            return session_id
+    return None
+
+
+def get_completed_session(user_id: int) -> str | None:
+    """A finished-but-not-yet-typed session (code issued, still valid), if any."""
+    for session_id, session in sessions.items():
+        if session['user_id'] == user_id and session['completed'] and not is_expired(session_id):
             return session_id
     return None
 

@@ -35,7 +35,11 @@ MIN_PLAY_TIME: float = float(os.getenv('MIN_PLAY_TIME', '3.0'))
 KILL_COOLDOWN: float = float(os.getenv('KILL_COOLDOWN', '0.5'))
 CAPTCHA_MIN_PIECES: int = int(os.getenv('CAPTCHA_MIN_PIECES', '3'))
 MARIO_MIN_PLAY_TIME: float = float(os.getenv('MARIO_MIN_PLAY_TIME', '5.0'))
-CAPTCHA_TYPES: list[str] = [t.strip() for t in os.getenv('CAPTCHA_TYPES', 'doom,tetris,mario').split(',') if t.strip()]
+_KNOWN_CAPTCHA_TYPES = ('doom', 'tetris', 'mario')
+CAPTCHA_TYPES: list[str] = [
+    t.strip().lower() for t in os.getenv('CAPTCHA_TYPES', ','.join(_KNOWN_CAPTCHA_TYPES)).split(',')
+    if t.strip().lower() in _KNOWN_CAPTCHA_TYPES
+] or list(_KNOWN_CAPTCHA_TYPES)   # unknown names are dropped; an empty/invalid list means "all three"
 TURNSTILE_SITE_KEY: str = os.getenv('TURNSTILE_SITE_KEY', '')
 TURNSTILE_SECRET_KEY: str = os.getenv('TURNSTILE_SECRET_KEY', '')
 TURNSTILE_ENABLED: bool = bool(TURNSTILE_SITE_KEY and TURNSTILE_SECRET_KEY)

@@ -16,6 +16,7 @@
 
 from aiogram import Bot, Dispatcher
 import asyncio
+import logging
 import personal_msg_handler
 import chat_member_handler
 import reaction_handler
@@ -23,8 +24,25 @@ import moderation_handler
 import webserver
 import config
 
+logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+log = logging.getLogger('entryguardian')
+
 bot = Bot(token=config.TOKEN)
 dp = Dispatcher()
+
+
+async def _supervised(name: str, coro_fn, *args) -> None:
+    """Run a background loop forever, restarting it after a crash instead of letting the
+    exception propagate out of asyncio.gather and take the whole bot down with it."""
+    while True:
+        try:
+            await coro_fn(*args)
+            return
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            log.exception('background task %s crashed; restarting in 5s', name)
+            await asyncio.sleep(5)
 
 
 async def main():
@@ -42,14 +60,14 @@ async def main():
     await asyncio.gather(
         dp.start_polling(bot, allowed_updates=['message', 'edited_message', 'chat_member', 'my_chat_member', 'message_reaction', 'callback_query', 'chat_join_request']),
         webserver.start_server(),
-        webserver.rate_limit_cleanup_task(),
-        personal_msg_handler.session_expiry_task(bot),
-        chat_member_handler.raid_reminder_task(bot),
-        chat_member_handler.captcha_timeout_task(bot),
-        chat_member_handler.pending_unban_retry_task(bot),
-        moderation_handler.flush_messages_task(),
-        moderation_handler.purge_old_messages_task(),
-        moderation_handler.scheduled_delete_task(bot),
+        _supervised('rate_limit_cleanup', webserver.rate_limit_cleanup_task),
+        _supervised('session_expiry', personal_msg_handler.session_expiry_task, bot),
+        _supervised('raid_reminder', chat_member_handler.raid_reminder_task, bot),
+        _supervised('captcha_timeout', chat_member_handler.captcha_timeout_task, bot),
+        _supervised('pending_unban_retry', chat_member_handler.pending_unban_retry_task, bot),
+        _supervised('flush_messages', moderation_handler.flush_messages_task),
+        _supervised('purge_old_messages', moderation_handler.purge_old_messages_task),
+        _supervised('scheduled_delete', moderation_handler.scheduled_delete_task, bot),
     )
 
 

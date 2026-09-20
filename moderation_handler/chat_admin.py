@@ -19,7 +19,7 @@ from aiogram.filters import Command
 import permissions
 from .common import (
     router, db_man, translator, _GROUP_TYPES,
-    _delete_silently, _ianswer, _require, _log_action,
+    _delete_silently, _ianswer, _require, _log_action, _clear_raid_reminder,
 )
 
 
@@ -41,6 +41,7 @@ async def raid_off(message: types.Message, bot: Bot) -> None:
     if not await _require(message, permissions.can_manage_roles(db_man, message.chat.id, message.from_user.id)):
         return
     db_man.set_raid_mode(message.chat.id, False)
+    await _clear_raid_reminder(bot, message.chat.id)
     _log_action(message, 'log_raid', translator.get_string('raid_state_off'))
     await _ianswer(message, translator.get_string('raid_off_msg'))
 

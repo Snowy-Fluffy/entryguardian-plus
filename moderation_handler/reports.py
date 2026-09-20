@@ -24,7 +24,7 @@ import config
 from .common import (
     router, db_man, translator, _GROUP_TYPES,
     _delete_silently, _ianswer, _esc, _full_user_info, _chat_info, _message_link,
-    _report_recipients, _reply_channel, _channel_mention, _resolve_target, _deny,
+    _report_recipients, _reply_channel, _channel_mention, _resolve_target, _deny, _TargetRefused, _refuse,
     _display_name_html, _global_name, _accessible_chats, _chat_title_or_none,
 )
 
@@ -65,16 +65,19 @@ async def report_cmd(message: types.Message, command: CommandObject, bot: Bot) -
         lines.append(translator.get_string('report_reason').format(reason))
     notice = '\n'.join(lines)
 
+    delivered = 0
     for uid in _report_recipients(message.chat.id, reporter.id):
         try:
             await bot.send_message(uid, notice)
+            delivered += 1
             if reported is not None:
                 await bot.forward_message(uid, message.chat.id, reported.message_id)
         except Exception:
             pass
 
     await _delete_silently(message)
-    await _ianswer(message, translator.get_string('report_sent'))
+    # Staff who never opened a DM with the bot can't be reached — say so instead of "sent".
+    await _ianswer(message, translator.get_string('report_sent' if delivered else 'report_nobody'))
 
 
 _PUNISH_LOG_KEYS = {
@@ -257,7 +260,12 @@ async def _render_punishments(bot: Bot, rows: list, target_id: int, target_label
     if len(rows) > _PUNL_MAX:
         lines.append(translator.get_string('punl_more').format(len(rows) - _PUNL_MAX))
     out = '\n'.join(lines)
-    return out if len(out) <= 4000 else out[:3999] + '…'
+    if len(out) <= 4000:
+        return out
+    # Cut on a line boundary: chopping mid-line could split an HTML entity/tag and make
+    # Telegram reject the whole message.
+    cut = out.rfind('\n', 0, 3990)
+    return out[:cut if cut > 0 else 3990] + '\n…'
 
 
 @router.message(Command('punl'))
@@ -286,7 +294,11 @@ async def punishments_cmd(message: types.Message, command: CommandObject, bot: B
         target_label = _channel_mention(channel)
         include_first_seen = False
     else:
-        target_id = await _resolve_target(message, command, bot)
+        try:
+            target_id = await _resolve_target(message, command, bot)
+        except _TargetRefused as e:
+            await _refuse(message, e)
+            return
         if target_id is None:
             provided = bool(message.reply_to_message) or bool((command.args or '').strip())
             key = 'mod_user_not_found' if provided else 'mod_specify_user'
@@ -323,7 +335,11 @@ async def uinfo_cmd(message: types.Message, command: CommandObject, bot: Bot) ->
         await message.answer(translator.get_string('mod_no_permission'))
         return
 
-    target_id = await _resolve_target(message, command, bot)
+    try:
+        target_id = await _resolve_target(message, command, bot)
+    except _TargetRefused as e:
+        await _refuse(message, e)
+        return
     if target_id is None:
         provided = bool(message.reply_to_message) or bool((command.args or '').strip())
         key = 'mod_user_not_found' if provided else 'mod_specify_user'

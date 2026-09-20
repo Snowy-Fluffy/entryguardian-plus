@@ -25,6 +25,8 @@ import session_manager
 import config
 import asyncio
 import random
+import re
+from moderation_handler.common import _flood_safe, _chat_title
 
 router = Router()
 db_man = DBManager()
@@ -32,32 +34,42 @@ translator = Translator(config.LOCALE)
 
 _attempts_left: dict[int, int] = {}
 
+_CODE_RE = re.compile(r'[A-Z0-9]{6}')
 
-async def _unrestrict_user(bot: Bot, user_id: int) -> None:
+
+async def _unrestrict_user(bot: Bot, user_id: int) -> list[int]:
+    """Lift the captcha restriction in every chat the user is pending in (re-applying a
+    standing mute instead where one exists). Returns the chats where it *failed*: those keep
+    their pending row — a rejoin (handle_new_user) or the next verification finishes the job —
+    and the user is told, rather than being greeted with "verified!" while still muted."""
+    failed: list[int] = []
     for chat_id in db_man.get_pending_chats(user_id):
+        muted, until = db_man.effective_mute(chat_id, user_id)
+        if muted:
+            call = lambda: bot.restrict_chat_member(
+                chat_id=chat_id, user_id=user_id,
+                permissions=ChatPermissions(can_send_messages=False), until_date=until or None)
+        else:
+            call = lambda: bot.restrict_chat_member(
+                chat_id=chat_id, user_id=user_id,
+                permissions=moderation_handler.build_chat_permissions(chat_id))
         try:
-            muted, until = db_man.effective_mute(chat_id, user_id)
-            if muted:
-                await bot.restrict_chat_member(
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    permissions=ChatPermissions(can_send_messages=False),
-                    until_date=until or None,
-                )
+            await _flood_safe(call)
+        except Exception as e:
+            # Nothing to lift (bot lost rights / user already left) isn't a failure to report.
+            text = str(e).lower()
+            if 'not a member' in text or 'user not found' in text or 'chat not found' in text:
+                pass
             else:
-                await bot.restrict_chat_member(
-                    chat_id=chat_id,
-                    user_id=user_id,
-                    permissions=moderation_handler.build_chat_permissions(chat_id),
-                )
-        except Exception:
-            pass
-    db_man.clear_pending_chats(user_id)
+                failed.append(chat_id)
+                continue
+        db_man.remove_pending_chat(user_id, chat_id)
+    return failed
 
 
 def _build_link_msg(session_id: str) -> tuple[str, InlineKeyboardMarkup]:
     url = f'{config.CAPTCHA_BASE_URL}/{session_id}'
-    text = translator.get_string('captcha_link_msg')
+    text = translator.get_string('captcha_link_msg').format(max(1, config.CAPTCHA_TIMEOUT // 60))
     markup = InlineKeyboardMarkup(inline_keyboard=[[
         InlineKeyboardButton(text=translator.get_string('captcha_button'), url=url)
     ]])
@@ -88,6 +100,10 @@ async def start_handler(message: types.Message) -> None:
         text, markup = _build_link_msg(pending)
         await message.answer(text, reply_markup=markup)
         return
+    if session_manager.get_completed_session(user_id):
+        # The web part is done and a code exists — no point starting a new game; just type it.
+        await message.answer(translator.get_string('code_already_issued'))
+        return
 
     captcha_type = random.choice(config.CAPTCHA_TYPES)
     session_id = session_manager.create_session(user_id, captcha_type)
@@ -115,6 +131,11 @@ async def handle_code_attempt(message: types.Message, bot: Bot) -> None:
         return
 
     code = (message.text or '').strip().upper()
+    if not _CODE_RE.fullmatch(code):
+        # A sticker, a "hi", a question — not a code attempt. Don't burn an attempt (three of
+        # those would temp-block a human and kill their web session); just point at the code.
+        await message.answer(translator.get_string('code_hint'))
+        return
     session_id = session_manager.find_by_code(user_id, code)
 
     if session_id is None:
@@ -130,18 +151,22 @@ async def handle_code_attempt(message: types.Message, bot: Bot) -> None:
             await message.answer(translator.get_string('temp_block'))
         return
 
-    await message.answer(translator.get_string('verified'))
     db_man.verify_user(user_id)
     session_manager.remove_session(session_id)
     _attempts_left.pop(user_id, None)
-    await _unrestrict_user(bot, user_id)
+    failed = await _unrestrict_user(bot, user_id)
     await chat_member_handler.delete_welcome_msg(bot, user_id)
+    text = translator.get_string('verified')
+    for chat_id in failed:
+        text += '\n' + translator.get_string('verified_partial').format(await _chat_title(bot, chat_id))
+    await message.answer(text)
 
 
 async def session_expiry_task(bot: Bot) -> None:
     while True:
         await asyncio.sleep(30)
         for user_id in session_manager.cleanup_expired():
+            _attempts_left.pop(user_id, None)
             try:
                 await bot.send_message(user_id, translator.get_string('captcha_expired'))
             except Exception:

@@ -24,7 +24,7 @@ from .common import (
     _delete_silently, _ianswer, _ianswer_html,
     _require, _cooldown_guard, _cooldown_mark,
     _user_label, _log_action, _record_log,
-    _hierarchy_ok, _is_bot_target, _parse_ban, _punish_labels,
+    _hierarchy_ok, _is_bot_target, _parse_ban, _punish_labels, _TargetRefused,
     _reply_channel, _channel_mention,
     _parse_duration, _human_duration_words,
 )
@@ -81,7 +81,10 @@ def _parse_delete_modifier(token: str):
 
 async def _parse_delete_user(message: types.Message, command: CommandObject, bot: Bot):
     """Return (target_id, since_ts | None, limit | None, dur_token | None, error_key | None)."""
-    target_id, rest = await _parse_ban(message, command, bot)
+    try:
+        target_id, rest = await _parse_ban(message, command, bot)
+    except _TargetRefused as e:
+        return None, None, None, None, e.key
     if target_id is None:
         return None, None, None, None, None
     token = rest.strip().split()[0] if rest.strip() else ''
@@ -173,6 +176,9 @@ async def _run_delete_user(message: types.Message, command: CommandObject, bot: 
 
     target_id, since, limit, dur_token, error_key = await _parse_delete_user(message, command, bot)
     if target_id is None:
+        if error_key:   # a refused target (pseudo-account / channel id) carries its own message
+            await _ianswer(message, translator.get_string(error_key))
+            return False
         provided = bool(message.reply_to_message) or bool((command.args or '').strip())
         await _ianswer(message, translator.get_string('mod_user_not_found' if provided else 'mod_specify_user'))
         return False

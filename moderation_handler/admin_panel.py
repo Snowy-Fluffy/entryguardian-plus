@@ -27,7 +27,7 @@ from .common import (
     _entity_name, _global_name, _resolve_username_token,
     _record_log, _human_time, _COOLDOWN_COMMANDS,
     _chat_perm_set, _perm_supported, _PERM_GROUPS, _PERM_ORDER,
-    _parse_duration, _spawn,
+    _parse_duration, _spawn, _parse_id_token, _TargetRefused, _clear_raid_reminder,
 )
 from .chat_admin import _leave_chat
 
@@ -50,6 +50,11 @@ _BROADCAST_SEND_DELAY = 0.05
 _BROADCAST_PROGRESS_EVERY = 25
 
 _LOG_PAGE_SIZE = 10
+
+_RULES_MAX_LEN = 3500
+"""/rules wraps the text in a header + <i>…</i> with HTML escaping; leave room under 4096."""
+
+_ANTISPAM_FIELDS = ('count', 'window', 'mute')
 
 _ROLE_ACTIONS = {
     'aa': ('admin', 'is_admin', 'already_admin', 'admin_added', 'log_add_adm'),
@@ -455,6 +460,8 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
     elif action == 'raid':
         new_state = not db_man.is_raid_mode(chat_id)
         db_man.set_raid_mode(chat_id, new_state)
+        if not new_state:
+            await _clear_raid_reminder(bot, chat_id)
         _record_log(chat_id, callback.from_user, 'log_raid',
                     translator.get_string('raid_state_on' if new_state else 'raid_state_off'))
         text, markup = await _build_chat_menu(bot, chat_id, user_id)
@@ -545,7 +552,10 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
         text, markup = _build_cooldown_menu(chat_id)
         await _edit(callback.message, text, markup)
     elif action == 'cdset':
-        cmd = parts[3]
+        cmd = parts[3] if len(parts) > 3 else ''
+        if cmd not in _COOLDOWN_COMMANDS:
+            await callback.answer()
+            return
         _panel_state[user_id] = {'action': 'cooldown', 'chat_id': chat_id, 'cmd': cmd}
         markup = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=translator.get_string('admin_btn_cancel'), callback_data=f'adm:cd:{chat_id}')
@@ -577,7 +587,10 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
         text, markup = _build_antispam_menu(chat_id)
         await _edit(callback.message, text, markup)
     elif action == 'aspset':
-        field = parts[3]
+        field = parts[3] if len(parts) > 3 else ''
+        if field not in _ANTISPAM_FIELDS:
+            await callback.answer()
+            return
         _panel_state[user_id] = {'action': 'antispam', 'chat_id': chat_id, 'field': field}
         markup = InlineKeyboardMarkup(inline_keyboard=[[
             InlineKeyboardButton(text=translator.get_string('admin_btn_cancel'), callback_data=f'adm:asp:{chat_id}')
@@ -614,9 +627,14 @@ async def _resolve_panel_target(message: types.Message, bot: Bot) -> int | None:
     if not text:
         return None
     token = text.split()[0]
-    if token.lstrip('-').isdigit():
-        return int(token)
-    return await _resolve_username_token(bot, token)
+    try:
+        numeric = _parse_id_token(token)
+        if numeric is not None:
+            return numeric
+        return await _resolve_username_token(bot, token)
+    except _TargetRefused as e:
+        await message.answer(translator.get_string(e.key))
+        return None
 
 
 async def _apply_panel_role(bot: Bot, actor: types.User, chat_id: int, action: str, target_id: int) -> str:
@@ -628,6 +646,8 @@ async def _apply_panel_role(bot: Bot, actor: types.User, chat_id: int, action: s
         role, checker, already_key, done_key, log_key = _ROLE_ACTIONS[action]
         if getattr(db_man, checker)(chat_id, target_id):
             return translator.get_string(already_key).format(name)
+        if role == 'moderator' and db_man.is_admin(chat_id, target_id):
+            return translator.get_string('already_admin_use_del').format(name)
         db_man.set_role(chat_id, target_id, role)
         _record_log(chat_id, actor, log_key, name)
         return translator.get_string(done_key).format(name)
@@ -722,6 +742,8 @@ async def admin_panel_input(message: types.Message, bot: Bot) -> None:
             db_man.set_rules(chat_id, '')
             _record_log(chat_id, message.from_user, 'log_rules', translator.get_string('rules_state_cleared'))
             result = translator.get_string('rules_cleared')
+        elif len(message.text or '') > _RULES_MAX_LEN:
+            result = translator.get_string('rules_too_long').format(_RULES_MAX_LEN)
         else:
             db_man.set_rules(chat_id, message.text or '')
             _record_log(chat_id, message.from_user, 'log_rules', translator.get_string('rules_state_set'))
@@ -934,6 +956,7 @@ async def _run_broadcast(bot: Bot, owner_id: int, pending: dict[str, Any]) -> No
 
 @router.callback_query(F.data.startswith('bc:'))
 async def broadcast_callback(callback: types.CallbackQuery, bot: Bot) -> None:
+    global _broadcast_running
     user_id = callback.from_user.id
     if not permissions.is_owner(user_id):
         await callback.answer(translator.get_string('admin_no_access'), show_alert=True)
@@ -967,6 +990,7 @@ async def broadcast_callback(callback: types.CallbackQuery, bot: Bot) -> None:
         if _broadcast_running:
             await callback.answer(translator.get_string('broadcast_busy'), show_alert=True)
             return
+        _broadcast_running = True   # claim it here, not inside the task — two clicks in one tick
         _spawn(_run_broadcast(bot, user_id, pending))
         await callback.answer()
         return

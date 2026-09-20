@@ -1,5 +1,3 @@
-version: "3.9"
-
 services:
   entryguardian:
     build: .
@@ -12,8 +10,11 @@ services:
     ports:
       - "127.0.0.1:8080:8080"
 
+    # The database lives in a mounted *directory*, not a single mounted file: SQLite keeps its
+    # WAL/journal as sibling files, which a file mount would leave inside the container layer.
     volumes:
-      - ./users.db:/app/users.db
+      - ./data:/app/data
 
     environment:
       - PYTHONUNBUFFERED=1
+      - DB_PATH=/app/data/users.db

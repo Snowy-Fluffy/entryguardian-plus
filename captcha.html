@@ -163,6 +163,7 @@
     <script>
         var screen_width;
         var screen_height;
+        var kill_requests = [];
         var total_backgrounds = 4;
         var total_enemies = 6;
         var enemy_width = 62;
@@ -258,11 +259,13 @@
                 total_kills++;
 
                 if (captcha_uuid && captcha_challenge) {
-                    fetch('/api/captcha/' + captcha_uuid + '/kill', {
+                    // Tracked so endGame() can wait for the last one — otherwise /complete could
+                    // race ahead of a slow /kill and be rejected for one kill too few.
+                    kill_requests.push(fetch('/api/captcha/' + captcha_uuid + '/kill', {
                         method: 'POST',
                         headers: {'Content-Type': 'application/json'},
                         body: JSON.stringify({challenge: captcha_challenge})
-                    });
+                    }).catch(function () {}));
                 }
 
                 setTimeout(function () {
@@ -280,7 +283,7 @@
 
                 setTimeout(function () {
                     if (total_kills == max_kills) {
-                        endGame();
+                        Promise.allSettled(kill_requests).then(endGame);
                     }
                 }, 500);
             }
@@ -360,6 +363,7 @@
             $(this).hide();
             $('#percent').css('width', '100%');
             total_kills = 0;
+            kill_requests = [];
             startGame();
         });
 

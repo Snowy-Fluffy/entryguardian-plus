@@ -125,7 +125,7 @@ async def _maybe_channel_ban(message: types.Message, command: CommandObject, bot
             await bot.ban_chat_sender_chat(chat_id, channel.id)
         except Exception:
             pass
-        if not silent and (not glob or db_man.is_gpunish_announce_enabled(chat_id)):
+        if not silent and (not glob or chat_id == message.chat.id or db_man.is_gpunish_announce_enabled(chat_id)):
             try:
                 await _isend_html(bot, chat_id, local_text if chat_id == message.chat.id else remote_text)
             except Exception:
@@ -173,7 +173,7 @@ async def _maybe_channel_unban(message: types.Message, bot: Bot,
             local_text = translator.get_string('ungban_announce').format(mention, role_word, actor)
             remote_text = translator.get_string('ungban_announce_remote').format(mention, _esc(source_title))
             for chat_id in chat_ids:
-                if db_man.is_gpunish_announce_enabled(chat_id):
+                if chat_id == message.chat.id or db_man.is_gpunish_announce_enabled(chat_id):
                     try:
                         await _isend_html(bot, chat_id, local_text if chat_id == message.chat.id else remote_text)
                     except Exception:
@@ -198,7 +198,7 @@ async def gban(message: types.Message, command: CommandObject, bot: Bot) -> None
     if permissions.is_owner(target_id):
         await _ianswer(message, translator.get_string('mod_cannot_target_owner'))
         return
-    if not await _native_admin_ok(message, bot, target_id):
+    if not await _native_admin_ok(message, bot, target_id, everywhere=True):
         return
 
     banned_html, banned = await _punish_labels(bot, message, command, target_id)
@@ -216,7 +216,7 @@ async def gban(message: types.Message, command: CommandObject, bot: Bot) -> None
             await bot.ban_chat_member(chat_id, target_id)
         except Exception:
             pass
-        if db_man.is_gpunish_announce_enabled(chat_id):
+        if chat_id == message.chat.id or db_man.is_gpunish_announce_enabled(chat_id):
             try:
                 await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
             except Exception:
@@ -283,7 +283,7 @@ async def sgban(message: types.Message, command: CommandObject, bot: Bot) -> Non
     if permissions.is_owner(target_id):
         await _ianswer(message, translator.get_string('mod_cannot_target_owner'))
         return
-    if not await _native_admin_ok(message, bot, target_id):
+    if not await _native_admin_ok(message, bot, target_id, everywhere=True):
         return
 
     banned_html, banned = await _punish_labels(bot, message, command, target_id)
@@ -372,7 +372,6 @@ async def ungban(message: types.Message, command: CommandObject, bot: Bot) -> No
     name_html, name = await _punish_labels(bot, message, command, target_id)
     db_man.remove_from_blocklist(target_id)
     db_man.clear_ban_exceptions(target_id)
-    db_man.clear_local_bans(target_id)
     _log_global(message, 'log_ungban', name, '', target_id, everywhere=True)
 
     source_title = message.chat.title or str(message.chat.id)
@@ -386,11 +385,15 @@ async def ungban(message: types.Message, command: CommandObject, bot: Bot) -> No
     if not is_dm:
         chat_ids.add(message.chat.id)
     for chat_id in chat_ids:
+        # A global amnesty lifts the *global* ban only: a chat's own local /ban stays in force
+        # there (local decisions beat global ones, in both directions).
+        if db_man.is_locally_banned(chat_id, target_id):
+            continue
         try:
             await bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
         except Exception:
             pass
-        if db_man.is_gpunish_announce_enabled(chat_id):
+        if chat_id == message.chat.id or db_man.is_gpunish_announce_enabled(chat_id):
             try:
                 await _isend_html(bot, chat_id, global_text if is_dm else (local_text if chat_id == message.chat.id else remote_text))
             except Exception:
@@ -421,7 +424,7 @@ async def unsban(message: types.Message, command: CommandObject, bot: Bot) -> No
         pass
     db_man.add_ban_exception(message.chat.id, target_id)
     db_man.remove_local_ban(message.chat.id, target_id)
-    _log_action(message, 'log_unsban', name)
+    _log_action(message, 'log_unsban', name, '', target_id)
 
 
 @router.message(Command('unsgban'))
@@ -440,11 +443,12 @@ async def unsgban(message: types.Message, command: CommandObject, bot: Bot) -> N
     name_html, name = await _punish_labels(bot, message, command, target_id)
     db_man.remove_from_blocklist(target_id)
     db_man.clear_ban_exceptions(target_id)
-    db_man.clear_local_bans(target_id)
     chat_ids = set(db_man.get_bot_chats())
     if not is_dm:
         chat_ids.add(message.chat.id)
     for chat_id in chat_ids:
+        if db_man.is_locally_banned(chat_id, target_id):
+            continue
         try:
             await bot.unban_chat_member(chat_id, target_id, only_if_banned=True)
         except Exception:

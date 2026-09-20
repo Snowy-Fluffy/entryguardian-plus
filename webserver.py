@@ -57,6 +57,8 @@ _ALLOWED_ASSET_EXTS = frozenset({
 
 _wrapper_template: str | None = None
 
+_NO_STORE = {'Cache-Control': 'no-store'}
+
 _RATE_LIMITED_PREFIXES = ('/captcha/', '/api/captcha/')
 
 _rate_buckets: dict[str, deque] = {}
@@ -82,7 +84,9 @@ def _client_ip(request: web.Request) -> str:
             return real_ip
         forwarded = request.headers.get('X-Forwarded-For', '')
         if forwarded:
-            candidate = forwarded.split(',')[0].strip()
+            # The *last* entry is the one appended by the proxy in front of us; anything before
+            # it is whatever the client chose to send and can't be trusted.
+            candidate = forwarded.split(',')[-1].strip()
             if _is_valid_ip(candidate):
                 return candidate
     return request.remote or 'unknown'
@@ -112,6 +116,11 @@ async def rate_limit_middleware(request: web.Request, handler):
     while bucket and now - bucket[0] > config.RATE_LIMIT_WINDOW:
         bucket.popleft()
     if len(bucket) >= config.RATE_LIMIT_MAX:
+        if request.path.startswith('/captcha/'):
+            # A person in the in-app browser, not a script: give them a page, not JSON.
+            return web.Response(text=_captcha_page_html('', '', 'doom', state='ratelimit'),
+                                content_type='text/html', status=429,
+                                headers={'Cache-Control': 'no-store'})
         return web.json_response({'error': 'rate limited'}, status=429)
     bucket.append(now)
     return await handler(request)
@@ -149,7 +158,7 @@ _PAGE_HTML_KEYS = (
 _PAGE_JS_KEYS = (
     'web_step_game', 'web_step_browser', 'web_step_pow', 'web_step_code', 'web_step_done',
     'web_error_title_failed', 'web_error_title_link', 'web_error_expired', 'web_error_game',
-    'web_error_pow', 'web_error_network',
+    'web_error_pow', 'web_error_network', 'web_error_ratelimit',
 )
 
 # Locale keys the Tetris iframe needs — passed to it as an `i18n` query parameter (it's a static
@@ -220,7 +229,7 @@ async def handle_captcha_page(request: web.Request) -> web.Response:
     session = session_manager.sessions.get(session_id)
     if not session or session_manager.is_expired(session_id):
         return web.Response(text=_captcha_page_html('', '', 'doom', state='error'),
-                            content_type='text/html', status=410)
+                            content_type='text/html', status=410, headers=_NO_STORE)
 
     if config.COLLECT_CAPTCHA_IPS:
         db_man.record_first_captcha_visit(
@@ -233,9 +242,11 @@ async def handle_captcha_page(request: web.Request) -> web.Response:
     captcha_type = session.get('captcha_type', 'doom')
     if session.get('completed') and session.get('code'):
         return web.Response(text=_captcha_page_html(session_id, '', captcha_type, state='completed'),
-                            content_type='text/html')
+                            content_type='text/html', headers=_NO_STORE)
     challenge = session_manager.set_page_loaded(session_id)
-    return web.Response(text=_captcha_page_html(session_id, challenge, captcha_type), content_type='text/html')
+    # no-store: the back button / bfcache must not resurrect a page whose challenge was reset.
+    return web.Response(text=_captcha_page_html(session_id, challenge, captcha_type),
+                        content_type='text/html', headers=_NO_STORE)
 
 
 async def handle_kill(request: web.Request) -> web.Response:
@@ -278,6 +289,10 @@ async def handle_verify_turnstile(request: web.Request) -> web.Response:
         return web.json_response({'error': 'bad request'}, status=400)
     if not token:
         return web.json_response({'error': 'missing token'}, status=400)
+    session = session_manager.sessions.get(session_id)
+    if (not session or session_manager.is_expired(session_id) or session.get('completed')
+            or session.get('challenge') != challenge or not session.get('game_passed')):
+        return web.json_response({'error': 'rejected'}, status=403)   # don't spend siteverify on junk
 
     form = {'secret': config.TURNSTILE_SECRET_KEY, 'response': token}
     client_ip = _client_ip(request)
@@ -321,6 +336,9 @@ async def handle_altcha_challenge(request: web.Request) -> web.Response:
         expires_at=int(time.time()) + _ALTCHA_CHALLENGE_TTL,
         data={'sid': session_id},
     )
+    # One-shot: only the most recently issued challenge is accepted by /verify_altcha, once.
+    # The HMAC signature identifies it (the parameters carry a random salt, so it's unique).
+    session['altcha_challenge'] = ch.signature
     return web.json_response(ch.to_dict())
 
 
@@ -336,16 +354,32 @@ async def handle_verify_altcha(request: web.Request) -> web.Response:
     if not isinstance(payload_str, str) or not payload_str:
         return web.json_response({'error': 'missing payload'}, status=400)
 
+    # Cheap checks first — the PBKDF2 verification below costs real CPU, so it must not be
+    # reachable for a session that couldn't pass anyway.
+    session = session_manager.sessions.get(session_id)
+    if (not session or session_manager.is_expired(session_id) or session.get('completed')
+            or session.get('challenge') != challenge
+            or not (session.get('game_passed') and session.get('turnstile_passed'))):
+        return web.json_response({'error': 'rejected'}, status=403)
+
     try:
         decoded = Payload.from_base64(payload_str)
     except Exception:
         return web.json_response({'error': 'bad payload'}, status=400)
 
-    bound_sid = (decoded.challenge.parameters.data or {}).get('sid')
+    data = decoded.challenge.parameters.data
+    if data is not None and not isinstance(data, dict):
+        return web.json_response({'error': 'bad payload'}, status=400)
+    bound_sid = (data or {}).get('sid')
     if bound_sid != session_id:
         return web.json_response({'error': 'session mismatch'}, status=403)
+    expected = session.get('altcha_challenge')
+    if not expected or decoded.challenge.signature != expected:
+        return web.json_response({'error': 'rejected'}, status=403)   # stale / replayed / unissued
+    session['altcha_challenge'] = None   # consumed, whether or not the solution checks out
 
-    result = verify_solution(decoded, hmac_secret=_ALTCHA_HMAC_SECRET)
+    loop = asyncio.get_running_loop()
+    result = await loop.run_in_executor(None, lambda: verify_solution(decoded, hmac_secret=_ALTCHA_HMAC_SECRET))
     if not result.verified:
         return web.json_response({'error': 'altcha failed'}, status=403)
 
@@ -364,8 +398,9 @@ async def handle_code_image(request: web.Request) -> web.Response:
     session = session_manager.sessions.get(session_id)
     if not session or not session.get('completed') or not session.get('code'):
         raise web.HTTPNotFound()
-    buf = _image_captcha.generate(session['code'])
-    return web.Response(body=buf.getvalue(), content_type='image/png', headers={'Cache-Control': 'no-store'})
+    loop = asyncio.get_running_loop()
+    buf = await loop.run_in_executor(None, _image_captcha.generate, session['code'])
+    return web.Response(body=buf.getvalue(), content_type='image/png', headers=_NO_STORE)
 
 
 async def handle_doom_file(request: web.Request) -> web.FileResponse:

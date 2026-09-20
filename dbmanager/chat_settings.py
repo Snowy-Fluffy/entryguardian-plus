@@ -7,7 +7,16 @@ class ChatSettingsMixin:
 		return newly_added
 
 	def forget_chat(self, chat_id):
-		self.cursor.execute('DELETE FROM bot_chats WHERE chat_id=?', (chat_id,))
+		"""The bot left / was removed from a chat. Drop it from the known set and clear the
+		*working* per-chat state that would otherwise be retried or swept forever (pending
+		captchas and their unban obligations, raid mode, stop flag, auto-delete queue, welcome
+		bookkeeping, message log, antispam streaks, cooldown usage). Configuration — roles, rules,
+		toggles, antispam thresholds, local bans/mutes/exceptions — is kept, so re-adding the bot
+		restores the chat as it was."""
+		for table in ('bot_chats', 'pending_chats', 'pending_unbans', 'raid_mode', 'stopped_chats',
+		              'scheduled_deletes', 'welcome_msgs', 'antispam_streak', 'recent_messages',
+		              'recent_channel_messages', 'cooldown_use'):
+			self.cursor.execute(f'DELETE FROM {table} WHERE chat_id=?', (chat_id,))
 		self.connection.commit()
 
 	def get_bot_chats(self):

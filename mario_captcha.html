@@ -115,9 +115,11 @@
                 }).then(function (r) {
                     if (r.ok) {
                         scheduleEnd();
+                    } else {
+                        // Rejected: stale challenge (link opened in a second tab resets it), rate
+                        // limit, or the timing check. Let the wrapper show an error + retry.
+                        try { window.parent.postMessage({ event: 'levelFailed' }, window.location.origin); } catch (e) {}
                     }
-                    // If rejected (e.g. timing check failed), game stays frozen at flagpole.
-                    // This only happens to bots — a human player can't reach the flag this fast.
                 }).catch(function () {
                     // Network error: don't punish the player, proceed anyway
                     scheduleEnd();

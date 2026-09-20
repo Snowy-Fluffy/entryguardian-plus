@@ -18,9 +18,10 @@
 translator singletons, and every helper used by more than one submodule. No other submodule may be
 imported from here — this keeps the package's import graph a strict star with no cycles."""
 
-from typing import Any, Awaitable
+from typing import Any, Awaitable, Callable
 import asyncio
 import html
+import logging
 import re
 import time
 from aiogram import Router, types, Bot
@@ -42,11 +43,90 @@ _bg_tasks: set[asyncio.Task] = set()
 _seen_cache: dict[int, tuple] = {}
 
 
+log = logging.getLogger('entryguardian')
+
+
+def _task_done(task: asyncio.Task) -> None:
+    _bg_tasks.discard(task)
+    if not task.cancelled() and task.exception() is not None:
+        log.error('background task %s failed', task.get_name(), exc_info=task.exception())
+
+
 def _spawn(coro: Awaitable[Any]) -> None:
-    """Run a coroutine detached, keeping a reference until it finishes."""
+    """Run a coroutine detached, keeping a reference until it finishes; a crash is logged
+    instead of vanishing into "Task exception was never retrieved"."""
     task = asyncio.ensure_future(coro)
     _bg_tasks.add(task)
-    task.add_done_callback(_bg_tasks.discard)
+    task.add_done_callback(_task_done)
+
+
+async def _flood_safe(call: Callable[[], Awaitable[Any]]) -> Any:
+    """Await a Bot API call; if Telegram answers with Retry-After, wait it out once and retry.
+    Any other error propagates — the caller decides whether it's fatal."""
+    try:
+        return await call()
+    except Exception as e:
+        retry_after = float(getattr(e, 'retry_after', 0) or 0)
+        if retry_after > 0:
+            await asyncio.sleep(retry_after + 1)
+            return await call()
+        raise
+
+
+_PSEUDO_IDS = frozenset({136817688, 1087968824})
+"""Telegram's shared pseudo-accounts: @Channel_Bot (every post made *as a channel*) and
+GroupAnonymousBot (every anonymous admin post). A punishment or role written for one of these
+ids would apply to every channel post / every anonymous admin everywhere — never a real target.
+Channels are banned via _reply_channel (sender_chat); anonymous admins can't be targeted at all."""
+
+
+class _TargetRefused(Exception):
+    """A target was resolved but must not be acted on; `key` is the locale string to answer with.
+    Raised by the low-level resolvers, turned into a reply by the *_or_reply wrappers."""
+    def __init__(self, key: str):
+        super().__init__(key)
+        self.key = key
+
+
+_NUMERIC_ID_RE = re.compile(r'-?\d+')
+
+
+def _parse_id_token(token: str) -> int | None:
+    """A bare numeric user id, or None if the token isn't one. ASCII digits only — str.isdigit()
+    accepts '²'/'①' and lstrip('-') lets '--5' through, both of which then crash int().
+    A negative id is a chat/channel, not a user: refused (channels are targeted by reply)."""
+    if not _NUMERIC_ID_RE.fullmatch(token):
+        return None
+    value = int(token)
+    if value < 0:
+        raise _TargetRefused('use_reply_for_channel')
+    if value in _PSEUDO_IDS:
+        raise _TargetRefused('cannot_target_pseudo')
+    return value
+
+
+def _check_user_target(user: types.User | None) -> int | None:
+    """A User taken from a reply/mention as a target id — refusing the pseudo-accounts."""
+    if user is None:
+        return None
+    if user.id in _PSEUDO_IDS:
+        raise _TargetRefused('cannot_target_pseudo')
+    return user.id
+
+
+def _entity_tail(text: str, entity: types.MessageEntity) -> str:
+    """Text after an entity. Entity offsets are UTF-16 code units, not Python characters —
+    slicing the str directly is off by one per astral character (emoji) before/inside it."""
+    raw = text.encode('utf-16-le')
+    return raw[(entity.offset + entity.length) * 2:].decode('utf-16-le', 'ignore').strip()
+
+
+async def _refuse(message: types.Message, exc: _TargetRefused) -> None:
+    text = translator.get_string(exc.key)
+    if message.chat.type in _GROUP_TYPES:
+        await _ianswer(message, text)
+    else:
+        await message.answer(text)
 
 
 def _cache_from_chat(chat) -> None:
@@ -68,28 +148,36 @@ async def _resolve_username_token(bot: Bot, username: str) -> int | None:
     token = username if username.startswith('@') else f'@{username}'
     try:
         chat = await bot.get_chat(token)
+    except Exception:
+        chat = None
+    if chat is not None:
+        if chat.type != 'private':
+            # getChat resolves channel/group usernames too — those are never a *user* target
+            # (a channel is banned by replying to its post, which goes to the channel blocklist).
+            raise _TargetRefused('use_reply_for_channel')
         _cache_from_chat(chat)
         return chat.id
-    except Exception:
-        pass
     return db_man.find_user_by_username(token)
 
 
 async def _resolve_target(message: types.Message, command: CommandObject, bot: Bot) -> int | None:
-    """Resolve the target user id from a text_mention, a reply, a numeric id, or an @username."""
+    """Resolve the target user id — same precedence as _parse_ban: the reply, else a
+    text_mention, else a numeric id / @username argument. Raises _TargetRefused for the
+    pseudo-accounts and for chats/channels (see _parse_id_token)."""
+    if message.reply_to_message and message.reply_to_message.from_user:
+        return _check_user_target(message.reply_to_message.from_user)
+
     for entity in message.entities or []:
         if entity.type == 'text_mention' and entity.user:
-            return entity.user.id
-
-    if message.reply_to_message and message.reply_to_message.from_user:
-        return message.reply_to_message.from_user.id
+            return _check_user_target(entity.user)
 
     arg = (command.args or '').strip().split()[0] if command.args else ''
     if not arg:
         return None
 
-    if arg.lstrip('-').isdigit():
-        return int(arg)
+    numeric = _parse_id_token(arg)
+    if numeric is not None:
+        return numeric
 
     if arg.startswith('@'):
         return await _resolve_username_token(bot, arg)
@@ -210,10 +298,26 @@ async def scheduled_delete_task(bot: Bot) -> None:
             await asyncio.sleep(_SCHEDULED_DELETE_THROTTLE)
 
 
+_raid_reminder_msg: dict[int, int] = {}
+"""chat_id -> message id of the last anti-raid reminder posted there (chat_member_handler's
+raid_reminder_task replaces it every 5 min; /raid_off and the panel toggle delete it)."""
+
+
+async def _clear_raid_reminder(bot: Bot, chat_id: int) -> None:
+    mid = _raid_reminder_msg.pop(chat_id, None)
+    if mid is not None:
+        try:
+            await bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+
+
 _NATIVE_ADMIN_TTL = 300
 """How long (seconds) a chat's fetched list of Telegram-native administrators is trusted before
 it's re-fetched. Promotions/demotions also invalidate it directly (chat_member_handler), so the
 TTL is only a safety net."""
+
+_NATIVE_ADMIN_FAIL_TTL = 30
 
 _native_admins: dict[int, tuple[float, frozenset[int]]] = {}
 """chat_id -> (fetched_at (monotonic), ids of creator + administrators)."""
@@ -230,9 +334,12 @@ async def _is_native_admin(bot: Bot, chat_id: int, user_id: int) -> bool:
     if entry is None or time.monotonic() - entry[0] > _NATIVE_ADMIN_TTL:
         try:
             ids = frozenset(m.user.id for m in await bot.get_chat_administrators(chat_id))
+            entry = (time.monotonic(), ids)
         except Exception:
+            # Keep stale data if we have it; otherwise cache "nobody" only briefly, so one API
+            # hiccup doesn't leave the chat's real admins unprotected for the whole TTL.
             ids = entry[1] if entry else frozenset()
-        entry = (time.monotonic(), ids)
+            entry = (time.monotonic() - _NATIVE_ADMIN_TTL + _NATIVE_ADMIN_FAIL_TTL, ids)
         _native_admins[chat_id] = entry
     return user_id in entry[1]
 
@@ -374,7 +481,11 @@ async def _isend_html(bot: Bot, chat_id: int, body: str) -> types.Message:
 async def _get_target_or_reply(message: types.Message, command: CommandObject, bot: Bot) -> int | None:
     """Resolve the target user and reply with an error string when it cannot be determined."""
     target_provided = bool(message.reply_to_message) or bool((command.args or '').strip())
-    target_id = await _resolve_target(message, command, bot)
+    try:
+        target_id = await _resolve_target(message, command, bot)
+    except _TargetRefused as e:
+        await _refuse(message, e)
+        return None
     if target_id is None:
         key = 'mod_user_not_found' if target_provided else 'mod_specify_user'
         await _ianswer(message, translator.get_string(key))
@@ -466,13 +577,26 @@ async def _hierarchy_ok(message: types.Message, target_id: int) -> bool:
     return True
 
 
-async def _native_admin_ok(message: types.Message, bot: Bot, target_id: int) -> bool:
-    """Refuse to punish a Telegram-native admin (creator/administrator of this chat, appointed
-    through Telegram itself, regardless of any bot role). Telegram would reject the ban/mute
-    anyway; checking up front gives a clear answer instead of a silent `ban_failed` or a
-    blocklist/mute row the chat can't actually enforce. Only meaningful in a group — a global
-    command sent from DM has no chat to check against, so it's allowed through. An unknown
-    target (never in the chat) also passes: the command then behaves exactly as before."""
+async def _native_admin_ok(message: types.Message, bot: Bot, target_id: int, *, everywhere: bool = False) -> bool:
+    """Refuse to punish a Telegram-native admin (creator/administrator, appointed through
+    Telegram itself, regardless of any bot role). Telegram would reject the ban/mute anyway;
+    checking up front gives a clear answer instead of a silent `ban_failed` or a blocklist/mute
+    row the chat can't actually enforce — and, for a *global* punishment (everywhere=True), stops
+    a middleware that would otherwise delete that admin's every message in the chat where the
+    API ban failed. Local commands check the command's own chat (one precise get_chat_member);
+    global ones check every known chat through the cached admin lists (_is_native_admin). An
+    unknown target (never in the chat) passes: the command then behaves exactly as before."""
+    if everywhere:
+        chat_ids = set(db_man.get_bot_chats())
+        if message.chat.type in _GROUP_TYPES:
+            chat_ids.add(message.chat.id)
+        for chat_id in chat_ids:
+            if await _is_native_admin(bot, chat_id, target_id):
+                title = await _chat_title(bot, chat_id)
+                text = translator.get_string('cannot_target_native_admin_in').format(title)
+                await (_ianswer(message, text) if message.chat.type in _GROUP_TYPES else message.answer(text))
+                return False
+        return True
     if message.chat.type not in _GROUP_TYPES:
         return True
     try:
@@ -540,23 +664,22 @@ async def _parse_ban(message: types.Message, command: CommandObject, bot: Bot) -
     args = (command.args or '').strip()
 
     if message.reply_to_message and message.reply_to_message.from_user:
-        return message.reply_to_message.from_user.id, args
+        return _check_user_target(message.reply_to_message.from_user), _cap_reason(args)
 
     for entity in message.entities or []:
         if entity.type == 'text_mention' and entity.user:
-            text = message.text or ''
-            reason = text[entity.offset + entity.length:].strip()
-            return entity.user.id, reason
+            return _check_user_target(entity.user), _cap_reason(_entity_tail(message.text or '', entity))
 
     if not args:
         return None, ''
 
     parts = args.split(maxsplit=1)
     token = parts[0]
-    reason = parts[1].strip() if len(parts) > 1 else ''
+    reason = _cap_reason(parts[1].strip() if len(parts) > 1 else '')
 
-    if token.lstrip('-').isdigit():
-        return int(token), reason
+    numeric = _parse_id_token(token)
+    if numeric is not None:
+        return numeric, reason
 
     if token.startswith('@'):
         return await _resolve_username_token(bot, token), reason
@@ -564,8 +687,21 @@ async def _parse_ban(message: types.Message, command: CommandObject, bot: Bot) -
     return None, reason
 
 
+_REASON_MAX = 300
+
+
+def _cap_reason(reason: str) -> str:
+    """Reasons are echoed into announcements, DMs and log lines; an essay-length one would push
+    those past Telegram's 4096 limit and the send would fail after the ban was already recorded."""
+    return reason if len(reason) <= _REASON_MAX else reason[:_REASON_MAX - 1] + '…'
+
+
 async def _ban_target_or_reply(message: types.Message, command: CommandObject, bot: Bot) -> tuple[int | None, str]:
-    target_id, reason = await _parse_ban(message, command, bot)
+    try:
+        target_id, reason = await _parse_ban(message, command, bot)
+    except _TargetRefused as e:
+        await _refuse(message, e)
+        return None, ''
     if target_id == bot.id:
         await _ianswer(message, translator.get_string('cannot_target_bot'))
         return None, reason

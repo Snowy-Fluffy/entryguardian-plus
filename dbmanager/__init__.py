@@ -33,6 +33,11 @@ class DBManager(UsersMixin, RolesMixin, BansMixin, MutesMixin, ChatSettingsMixin
 	def __init__(self):
 		self.connection = sqlite3.connect(config.DB_PATH, check_same_thread=False)
 		self.cursor = self.connection.cursor()
+		# WAL: readers don't block the writer and a commit no longer rewrites the whole journal;
+		# synchronous=NORMAL keeps durability across process crashes (not power loss) while
+		# cutting the per-commit fsync — every mixin method commits, on the event loop thread.
+		self.cursor.execute('PRAGMA journal_mode=WAL')
+		self.cursor.execute('PRAGMA synchronous=NORMAL')
 		self._msg_buffer: list[tuple[int, int, int, int]] = []
 		self._channel_msg_buffer: list[tuple[int, int, int, int]] = []
 		tables = {row[0] for row in self.cursor.execute('SELECT name FROM sqlite_master WHERE type="table"').fetchall()}
@@ -61,7 +66,9 @@ class DBManager(UsersMixin, RolesMixin, BansMixin, MutesMixin, ChatSettingsMixin
 		if 'gpunish_announce_disabled' not in tables:
 			self.cursor.execute('CREATE TABLE gpunish_announce_disabled(chat_id INTEGER PRIMARY KEY)')
 		if 'pending_unbans' not in tables:
-			self.cursor.execute('CREATE TABLE pending_unbans(chat_id INTEGER, user_id INTEGER, next_ts INTEGER, UNIQUE(chat_id, user_id))')
+			self.cursor.execute('CREATE TABLE pending_unbans(chat_id INTEGER, user_id INTEGER, next_ts INTEGER, attempts INTEGER DEFAULT 0, UNIQUE(chat_id, user_id))')
+		if 'welcome_msgs' not in tables:
+			self.cursor.execute('CREATE TABLE welcome_msgs(chat_id INTEGER, user_id INTEGER, message_id INTEGER, UNIQUE(chat_id, user_id))')
 		if 'raid_mode' not in tables:
 			self.cursor.execute('CREATE TABLE raid_mode(chat_id INTEGER PRIMARY KEY)')
 		if 'chat_rules' not in tables:
@@ -123,15 +130,6 @@ class DBManager(UsersMixin, RolesMixin, BansMixin, MutesMixin, ChatSettingsMixin
 			self.cursor.execute('CREATE TABLE dm_users(user_id INTEGER PRIMARY KEY, ts INTEGER)')
 		if 'captcha_ips' not in tables:
 			self.cursor.execute('CREATE TABLE captcha_ips(user_id INTEGER PRIMARY KEY, ip TEXT, user_agent TEXT, ts INTEGER)')
-		# When a global ban was issued. Older rows are backfilled from the staff log where possible.
-		for table, col in (('blocklist', 'user_id'), ('channel_blocklist', 'channel_id')):
-			cols = {row[1] for row in self.cursor.execute(f'PRAGMA table_info({table})').fetchall()}
-			if 'ts' not in cols:
-				self.cursor.execute(f'ALTER TABLE {table} ADD COLUMN ts INTEGER')
-				self.cursor.execute(
-					f'UPDATE {table} SET ts=(SELECT MAX(ts) FROM action_log WHERE action_log.target_id={table}.{col} '
-					f"AND action_log.action_key IN ('log_ban', 'log_sban')) WHERE ts IS NULL"
-				)
 		origin_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(captcha_origin)').fetchall()}
 		if 'via' not in origin_cols:
 			self.cursor.execute("ALTER TABLE captcha_origin ADD COLUMN via TEXT DEFAULT 'join'")
@@ -153,6 +151,43 @@ class DBManager(UsersMixin, RolesMixin, BansMixin, MutesMixin, ChatSettingsMixin
 		if 'since' not in pending_cols:
 			self.cursor.execute('ALTER TABLE pending_chats ADD COLUMN since INTEGER')
 			self.cursor.execute('UPDATE pending_chats SET since=? WHERE since IS NULL', (self.unix_time(),))
+		unban_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(pending_unbans)').fetchall()}
+		if 'attempts' not in unban_cols:
+			self.cursor.execute('ALTER TABLE pending_unbans ADD COLUMN attempts INTEGER DEFAULT 0')
+		# When a global ban was issued. Older rows are backfilled from the staff log where possible.
+		# Must run after action_log has target_id/action_key (added above) — a DB from before those
+		# columns existed would otherwise fail here at startup.
+		for table, col in (('blocklist', 'user_id'), ('channel_blocklist', 'channel_id')):
+			cols = {row[1] for row in self.cursor.execute(f'PRAGMA table_info({table})').fetchall()}
+			if 'ts' not in cols:
+				self.cursor.execute(f'ALTER TABLE {table} ADD COLUMN ts INTEGER')
+				self.cursor.execute(
+					f'UPDATE {table} SET ts=(SELECT MAX(ts) FROM action_log WHERE action_log.target_id={table}.{col} '
+					f"AND action_log.action_key IN ('log_ban', 'log_sban')) WHERE ts IS NULL"
+				)
+		# Telegram's shared pseudo-accounts (@Channel_Bot, GroupAnonymousBot) must never carry a
+		# punishment or a role: a row for them would hit every channel post / every anonymous
+		# admin. Commands refuse them now; this sweeps up anything written before that guard.
+		for table, col in (('blocklist', 'user_id'), ('local_bans', 'user_id'), ('mutes', 'user_id'),
+		                   ('global_mutes', 'user_id'), ('command_banned', 'user_id'), ('roles', 'user_id'),
+		                   ('ban_exceptions', 'user_id'), ('mute_exceptions', 'user_id')):
+			self.cursor.execute(f'DELETE FROM {table} WHERE {col} IN (136817688, 1087968824)')
+		# Global mutes used to be materialised as one `mutes` row per chat with the same `until`;
+		# they now live only in global_mutes, so drop those copies (a real local /mute would carry
+		# its own, different deadline) — otherwise /ungmute would mistake them for local mutes.
+		self.cursor.execute(
+			'DELETE FROM mutes WHERE EXISTS (SELECT 1 FROM global_mutes g WHERE g.user_id=mutes.user_id AND g.until=mutes.until)'
+		)
+		# Indexes for the lookups that run per message / per join on tables that grow without bound.
+		for name, ddl in (
+			('idx_user_id', 'user(id)'),
+			('idx_seen_users_username', 'seen_users(username)'),
+			('idx_action_log_chat_ts', 'action_log(chat_id, ts)'),
+			('idx_action_log_target', 'action_log(target_id)'),
+			('idx_pending_chats_user_chat', 'pending_chats(user_id, chat_id)'),
+			('idx_captcha_ips_ip', 'captcha_ips(ip)'),
+		):
+			self.cursor.execute(f'CREATE INDEX IF NOT EXISTS {name} ON {ddl}')
 		self.cursor.execute('DROP TABLE IF EXISTS welcome_log')
 		self.connection.commit()
 

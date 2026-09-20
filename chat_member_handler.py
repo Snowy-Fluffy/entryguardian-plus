@@ -22,122 +22,139 @@ from aiogram.types.chat_permissions import ChatPermissions
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.filters import IS_MEMBER, IS_NOT_MEMBER
 from dbmanager import DBManager
-from datetime import datetime
 import asyncio
 import html
+import logging
 import config
 from translator import Translator
-from moderation_handler import invalidate_native_admins
+from moderation_handler import invalidate_native_admins, build_chat_permissions
+# Shared with the moderation package on purpose: the same Retry-After wrapper and the same
+# raid-reminder registry (so /raid_off can delete the last reminder this task posted).
+from moderation_handler.common import _flood_safe, _raid_reminder_msg
 
 router = Router()
 db_man = DBManager()
 translator = Translator(config.LOCALE)
+log = logging.getLogger('entryguardian.join')
 
 bot_username: str | None = None
 
-_welcome_msg_by_user: dict[int, list[tuple[int, int]]] = {}
-
 _raid_bans: dict[int, int] = {}
-
-_raid_reminder_msg: dict[int, int] = {}
 
 _WELCOME_COOLDOWN = 3600
 
 _CAPTCHA_KICK_AFTER = 86400
 
+_MUTED = ChatPermissions(can_send_messages=False)
 
-async def delete_welcome_msg(bot: Bot, user_id: int) -> None:
-    """Delete all welcome messages for a user after they verify. Called from personal_msg_handler."""
-    for chat_id, msg_id in _welcome_msg_by_user.pop(user_id, []):
+
+async def delete_welcome_msg(bot: Bot, user_id: int, chat_id: int | None = None) -> None:
+    """Delete a user's welcome/captcha prompt(s) — everywhere, or in one chat — once they're
+    verified or kicked. Backed by the welcome_msgs table, so it works across restarts."""
+    for cid, mid in db_man.pop_welcomes_for_user(user_id, chat_id):
         try:
-            await bot.delete_message(chat_id, msg_id)
+            await bot.delete_message(cid, mid)
         except Exception:
             pass
 
 
 @router.chat_member(ChatMemberUpdatedFilter(IS_NOT_MEMBER >> IS_MEMBER))
 async def handle_new_user(event: ChatMemberUpdated, bot: Bot):
+    """A member joined. Order matters: anything that must *stop* them (ban, mute, captcha
+    restriction) is applied before anything that merely talks to them (welcome message), so a
+    flood error on the message can't leave the newcomer unrestricted."""
     user = event.new_chat_member.user
     user_id = user.id
     chat_id = event.chat.id
+
+    if user.is_bot:
+        return   # another bot added by an admin — not a captcha subject
 
     db_man.remember_user(user_id, user.username, user.full_name)
     db_man.remember_chat(chat_id)
 
     if db_man.is_blocklisted(user_id) and not db_man.is_ban_exception(chat_id, user_id):
         try:
-            await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+            await _flood_safe(lambda: bot.ban_chat_member(chat_id=chat_id, user_id=user_id))
         except Exception:
             pass
         return
 
     if db_man.is_raid_mode(chat_id):
         try:
-            await bot.ban_chat_member(chat_id=chat_id, user_id=user_id)
+            await _flood_safe(lambda: bot.ban_chat_member(chat_id=chat_id, user_id=user_id))
             _raid_bans[chat_id] = _raid_bans.get(chat_id, 0) + 1
         except Exception:
             pass
         return
 
+    # A standing mute (global or this chat's) is re-applied on join. It is *not* the end of the
+    # story: an unverified member still goes through the captcha below, otherwise a timed mute
+    # expiring would leave them a full member who never passed it.
     muted, until = db_man.effective_mute(chat_id, user_id)
     if muted:
         try:
-            await bot.restrict_chat_member(
-                chat_id=chat_id,
-                user_id=user_id,
-                permissions=ChatPermissions(can_send_messages=False),
-                until_date=until or None,
-            )
+            await _flood_safe(lambda: bot.restrict_chat_member(
+                chat_id=chat_id, user_id=user_id, permissions=_MUTED, until_date=until or None))
         except Exception:
             pass
-        db_man.add_mute(chat_id, user_id, until)
-        return
 
     if not db_man.is_captcha_enabled(chat_id):
         return
 
     if db_man.is_user_allowed(user_id):
+        # Verified already. A leftover pending row here means an earlier unrestrict failed (or
+        # the bot restarted mid-verification) — finish that job now instead of leaving them muted.
+        if chat_id in db_man.get_pending_chats(user_id):
+            db_man.remove_pending_chat(user_id, chat_id)
+            if not muted:
+                try:
+                    await _flood_safe(lambda: bot.restrict_chat_member(
+                        chat_id=chat_id, user_id=user_id, permissions=build_chat_permissions(chat_id)))
+                except Exception:
+                    pass
         return
 
-    if not db_man.welcome_within(chat_id, user_id, _WELCOME_COOLDOWN):
-        user_name = html.escape(user.full_name, quote=False)
-        user_display = f'<a href="tg://user?id={user_id}">{user_name}</a>'
-        welcome_key = 'welcome_msg' if db_man.is_kick_enabled(chat_id) else 'welcome_msg_nokick'
-        msg = translator.get_string(welcome_key).format(user_display)
-
-        keyboard = None
-        if bot_username:
-            keyboard = InlineKeyboardMarkup(inline_keyboard=[[
-                InlineKeyboardButton(
-                    text=translator.get_string('start_button'),
-                    url=f'https://t.me/{bot_username}?start=verify'
-                )
-            ]])
-
-        for uid, entries in list(_welcome_msg_by_user.items()):
-            for cid, mid in entries:
-                if cid == chat_id:
-                    try:
-                        await bot.delete_message(chat_id, mid)
-                    except Exception:
-                        pass
-            _welcome_msg_by_user[uid] = [(cid, mid) for cid, mid in entries if cid != chat_id]
-            if not _welcome_msg_by_user[uid]:
-                del _welcome_msg_by_user[uid]
-
-        sent = await bot.send_message(chat_id, msg, reply_markup=keyboard, parse_mode='HTML')
-        _welcome_msg_by_user.setdefault(user_id, []).append((chat_id, sent.message_id))
-        db_man.set_pending_since(chat_id, user_id)
-
-    await bot.restrict_chat_member(
-        chat_id=chat_id,
-        user_id=user_id,
-        permissions=ChatPermissions(can_send_messages=False),
-        until_date=int(datetime.now().timestamp()) + 5
-    )
-
+    # Unverified: restrict first (no until_date = until we lift it), then record, then greet.
+    if not muted:
+        try:
+            await _flood_safe(lambda: bot.restrict_chat_member(chat_id=chat_id, user_id=user_id, permissions=_MUTED))
+        except Exception:
+            log.warning('could not restrict new member %s in chat %s', user_id, chat_id, exc_info=True)
     db_man.record_captcha_origin(user_id, chat_id)
     db_man.add_pending_chat(user_id, chat_id)
+
+    if db_man.welcome_within(chat_id, user_id, _WELCOME_COOLDOWN):
+        return
+
+    user_name = html.escape(user.full_name, quote=False)
+    user_display = f'<a href="tg://user?id={user_id}">{user_name}</a>'
+    welcome_key = 'welcome_msg' if db_man.is_kick_enabled(chat_id) else 'welcome_msg_nokick'
+    msg = translator.get_string(welcome_key).format(user_display)
+
+    keyboard = None
+    if bot_username:
+        keyboard = InlineKeyboardMarkup(inline_keyboard=[[
+            InlineKeyboardButton(
+                text=translator.get_string('start_button'),
+                url=f'https://t.me/{bot_username}?start=verify'
+            )
+        ]])
+
+    # Only the newest welcome stays up in a chat (a join wave would otherwise pile them up);
+    # earlier joiners keep their DM link, and the captcha prompt reaches them via /start anyway.
+    for mid in db_man.pop_welcomes_in_chat(chat_id):
+        try:
+            await bot.delete_message(chat_id, mid)
+        except Exception:
+            pass
+
+    db_man.set_pending_since(chat_id, user_id)
+    try:
+        sent = await _flood_safe(lambda: bot.send_message(chat_id, msg, reply_markup=keyboard, parse_mode='HTML'))
+        db_man.set_welcome(chat_id, user_id, sent.message_id)
+    except Exception:
+        log.warning('could not post welcome for %s in chat %s', user_id, chat_id, exc_info=True)
 
 
 @router.chat_member()
@@ -214,89 +231,78 @@ async def raid_reminder_task(bot: Bot) -> None:
         _raid_bans.clear()
 
 
-async def _delete_user_welcome_in_chat(bot: Bot, user_id: int, chat_id: int) -> None:
-    """Best-effort removal of a user's welcome message in a single chat (and our tracking of it)."""
-    entries = _welcome_msg_by_user.get(user_id)
-    if not entries:
-        return
-    remaining = []
-    for cid, mid in entries:
-        if cid == chat_id:
-            try:
-                await bot.delete_message(chat_id, mid)
-            except Exception:
-                pass
-        else:
-            remaining.append((cid, mid))
-    if remaining:
-        _welcome_msg_by_user[user_id] = remaining
-    else:
-        _welcome_msg_by_user.pop(user_id, None)
-
-
 _KICK_THROTTLE = 1.0
+_KICK_BATCH = 50
 _UNBAN_AFTER = 15
 _UNBAN_RETRY_INTERVAL = 20
+_UNBAN_MAX_ATTEMPTS = 10
+_UNBAN_GIVE_UP_MARKERS = ('chat not found', 'not a member', 'kicked', 'user not found', 'bot was blocked')
 
 
-async def _flood_safe(call):
-    """Await a bot call; if rate-limited, wait out Telegram's Retry-After once and retry."""
-    try:
-        return await call()
-    except Exception as e:
-        retry_after = int(getattr(e, 'retry_after', 0) or 0)
-        if retry_after:
-            await asyncio.sleep(retry_after + 1)
-            return await call()
-        raise
+def _terminal_api_error(e: Exception) -> bool:
+    """An error that no retry will fix: the bot is gone from the chat, the chat is gone, the
+    user doesn't exist."""
+    text = str(e).lower()
+    return any(marker in text for marker in _UNBAN_GIVE_UP_MARKERS)
 
 
-async def _try_unban(bot: Bot, chat_id: int, user_id: int) -> bool:
-    """Lift a kick's ban. On failure, leave a persistent retry obligation (honouring Retry-After)."""
+async def _try_unban(bot: Bot, chat_id: int, user_id: int, attempts: int) -> bool:
+    """Lift a kick's ban. On failure, defer with exponential backoff and give up after
+    _UNBAN_MAX_ATTEMPTS or on an error that can't be retried (bot removed, chat gone)."""
     try:
         await bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
         db_man.remove_pending_unban(chat_id, user_id)
         return True
     except Exception as e:
-        delay = int(getattr(e, 'retry_after', 0) or 0) or 60
-        db_man.add_pending_unban(chat_id, user_id, db_man.unix_time() + delay)
+        retry_after = int(getattr(e, 'retry_after', 0) or 0)
+        if _terminal_api_error(e) or attempts + 1 >= _UNBAN_MAX_ATTEMPTS:
+            db_man.remove_pending_unban(chat_id, user_id)
+            return False
+        delay = retry_after or min(60 * 2 ** attempts, 3600)
+        db_man.defer_pending_unban(chat_id, user_id, db_man.unix_time() + delay)
         return False
 
 
 async def _kick_expired(bot: Bot, chat_id: int, user_id: int) -> None:
     """Kick one timed-out user: record the unban obligation, then ban. The unban itself is done
-    later by pending_unban_retry_task, once the ban has settled (avoids the ban/unban race)."""
+    later by pending_unban_retry_task, once the ban has settled (avoids the ban/unban race).
+    If the ban can't be done at all (no rights, bot gone, target became an admin), the pending
+    row is dropped rather than retried every sweep forever."""
     db_man.add_pending_unban(chat_id, user_id, db_man.unix_time() + _UNBAN_AFTER)
     try:
         await _flood_safe(lambda: bot.ban_chat_member(chat_id, user_id))
     except Exception:
-        return
+        db_man.remove_pending_unban(chat_id, user_id)
     db_man.remove_pending_chat(user_id, chat_id)
-    await _delete_user_welcome_in_chat(bot, user_id, chat_id)
+    await delete_welcome_msg(bot, user_id, chat_id)
 
 
 async def captcha_timeout_task(bot: Bot) -> None:
     """Kick users who never passed the captcha within _CAPTCHA_KICK_AFTER seconds.
-    They are unbanned shortly after by the retry task, so they can rejoin. Throttled so a large
-    backlog drains steadily instead of tripping the rate limit and stalling."""
+    They are unbanned shortly after by the retry task, so they can rejoin. Throttled and capped
+    per sweep so a large backlog drains steadily instead of tripping the rate limit."""
     while True:
         await asyncio.sleep(600)
+        done = 0
         for user_id, chat_id in db_man.get_expired_pending(_CAPTCHA_KICK_AFTER):
-            if not db_man.is_captcha_enabled(chat_id) or not db_man.is_kick_enabled(chat_id):
+            if done >= _KICK_BATCH:
+                break
+            if db_man.is_user_allowed(user_id):
+                db_man.remove_pending_chat(user_id, chat_id)   # verified meanwhile; stale row
+                continue
+            if (not db_man.is_captcha_enabled(chat_id) or not db_man.is_kick_enabled(chat_id)
+                    or db_man.is_chat_stopped(chat_id)):
                 continue
             await _kick_expired(bot, chat_id, user_id)
+            done += 1
             await asyncio.sleep(_KICK_THROTTLE)
 
 
 async def pending_unban_retry_task(bot: Bot) -> None:
-    """Perform every kick's unban once its ban has settled, retrying until it succeeds, so a kick
-    never leaves someone stuck banned."""
+    """Perform every kick's unban once its ban has settled, retrying with backoff until it
+    succeeds or is given up on, so a kick never leaves someone stuck banned."""
     while True:
         await asyncio.sleep(_UNBAN_RETRY_INTERVAL)
-        try:
-            due = db_man.get_due_unbans(db_man.unix_time())
-        except Exception:
-            continue
-        for chat_id, user_id in due:
-            await _try_unban(bot, chat_id, user_id)
+        for chat_id, user_id, attempts in db_man.get_due_unbans(db_man.unix_time()):
+            await _try_unban(bot, chat_id, user_id, attempts)
             await asyncio.sleep(_KICK_THROTTLE)
