@@ -25,6 +25,7 @@ from .common import (
     router, db_man, translator, _GROUP_TYPES,
     _delete_silently, _ianswer, _esc, _full_user_info, _chat_info, _message_link,
     _report_recipients, _reply_channel, _channel_mention, _resolve_target, _deny, _TargetRefused, _refuse,
+    _probe_user, _probe_chats,
     _display_name_html, _global_name, _accessible_chats, _chat_title_or_none,
 )
 
@@ -307,6 +308,10 @@ async def punishments_cmd(message: types.Message, command: CommandObject, bot: B
             await (_ianswer(message, translator.get_string(key)) if is_group
                    else message.answer(translator.get_string(key)))
             return
+        if not db_man.user_has_any_record(target_id):
+            # Unknown to the bot: ask Telegram for the card by id (same as the ban commands do)
+            # before declaring them never-seen — getChatMember answers for any valid id.
+            await _probe_user(bot, _probe_chats(message), target_id)
         target_label = await (_display_name_html(bot, message.chat.id, target_id) if is_group
                               else _global_name(bot, target_id))
         if not is_group:
@@ -348,6 +353,8 @@ async def uinfo_cmd(message: types.Message, command: CommandObject, bot: Bot) ->
         await message.answer(translator.get_string(key))
         return
 
+    if not db_man.user_has_any_record(target_id):
+        await _probe_user(bot, _probe_chats(message), target_id)
     if not db_man.user_has_any_record(target_id):
         await message.answer(translator.get_string('punl_unknown_user'))
         return

@@ -427,6 +427,29 @@ def _identity_plain(display_name: str, username: str | None, target_id: int) -> 
     return f'id {target_id}'
 
 
+def _probe_chats(message: types.Message) -> list[int]:
+    """Chats to ask about a user: the current group first, then every other known chat."""
+    if message.chat.type in _GROUP_TYPES:
+        return [message.chat.id] + [c for c in db_man.get_bot_chats() if c != message.chat.id]
+    return list(db_man.get_bot_chats())
+
+
+async def _probe_user(bot: Bot, chat_ids: list[int], target_id: int) -> types.User | None:
+    """Fetch a user's card by bare id through getChatMember on any chat the bot is in. Telegram
+    answers for *any* valid user id here — status 'left' for someone who was never in that
+    chat — so this resolves even accounts the bot has never seen. A hit is cached in seen_users,
+    which is also what makes a later @username lookup for the same person succeed. Returns
+    None only when no chat could answer (invalid id, or the bot is in no chat at all)."""
+    for chat_id in chat_ids:
+        try:
+            user = (await bot.get_chat_member(chat_id, target_id)).user
+        except Exception:
+            continue
+        db_man.remember_user(target_id, user.username, user.full_name or None)
+        return user
+    return None
+
+
 async def _identity_for(bot: Bot, message: types.Message, command: CommandObject,
                         target_id: int) -> tuple[str, str | None]:
     """Resolve (display_name, username) for a punishment target.
@@ -445,13 +468,8 @@ async def _identity_for(bot: Bot, message: types.Message, command: CommandObject
 
     arg = (command.args or '').strip().split()[0] if command.args else ''
     if not arg.startswith('@'):
-        chat_ids = [message.chat.id] + [c for c in db_man.get_bot_chats() if c != message.chat.id]
-        for chat_id in chat_ids:
-            try:
-                user = (await bot.get_chat_member(chat_id, target_id)).user
-            except Exception:
-                continue
-            db_man.remember_user(target_id, user.username, user.full_name or None)
+        user = await _probe_user(bot, _probe_chats(message), target_id)
+        if user is not None:
             return user.full_name or '', user.username
 
     cached = db_man.find_user_by_id(target_id)
