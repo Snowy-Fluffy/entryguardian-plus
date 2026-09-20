@@ -25,6 +25,9 @@ import webserver
 import config
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s %(levelname)s %(name)s: %(message)s')
+# aiogram logs every single update at INFO ("Update id=… is handled/not handled …") — pure noise
+# at our volume; keep its warnings/errors, drop the per-update chatter.
+logging.getLogger('aiogram.event').setLevel(logging.WARNING)
 log = logging.getLogger('entryguardian')
 
 bot = Bot(token=config.TOKEN)
