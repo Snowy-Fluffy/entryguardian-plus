@@ -237,6 +237,7 @@
 	"gban_owner_notice_noreason": "не указана",
 	"gban_time_unknown": "дата неизвестна",
 	"punl_origin_via_reaction": "(по реакции)",
+	"punl_origin_via_message": "(по сообщению)",
 	"punl_local_exception": "(снят в этом чате)",
 	"punl_globally_muted_until": "🔇 Глобально заглушён до {0}",
 	"uinfo_header": "👤 {0}",

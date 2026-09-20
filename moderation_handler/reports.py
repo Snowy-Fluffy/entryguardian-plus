@@ -110,6 +110,8 @@ async def _origin_chat_line(bot: Bot, target_id: int) -> str | None:
     line = translator.get_string('punl_origin_chat').format(_esc(title) if title else '?', chat_id, when)
     if via == 'reaction':
         line += ' ' + translator.get_string('punl_origin_via_reaction')
+    elif via == 'message':
+        line += ' ' + translator.get_string('punl_origin_via_message')
     return line
 
 

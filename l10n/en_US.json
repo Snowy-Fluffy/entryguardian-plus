@@ -237,6 +237,7 @@
 	"gban_owner_notice_noreason": "not given",
 	"gban_time_unknown": "date unknown",
 	"punl_origin_via_reaction": "(via a reaction)",
+	"punl_origin_via_message": "(via a message)",
 	"punl_local_exception": "(lifted in this chat)",
 	"punl_globally_muted_until": "🔇 Globally muted until {0}",
 	"uinfo_header": "👤 {0}",

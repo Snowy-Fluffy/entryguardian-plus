@@ -116,6 +116,10 @@ class UserTrackingMiddleware(BaseMiddleware):
             if _seen_cache.get(user.id) != entry:
                 db_man.remember_user(user.id, user.username, user.full_name)
                 _seen_cache[user.id] = entry
+                # First time this process sees them post in a group: if the bot has no origin
+                # for them yet (never seen joining or reacting), this chat is where they showed up.
+                if event.chat and event.chat.type in _GROUP_TYPES and user.id not in _PSEUDO_IDS:
+                    db_man.record_captcha_origin(user.id, event.chat.id, via='message')
             # Anyone who writes to the bot in private is a possible /broadcast DM recipient.
             if event.chat and event.chat.type == 'private' and user.id not in _dm_seen:
                 db_man.remember_dm_user(user.id)
