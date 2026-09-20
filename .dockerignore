@@ -7,3 +7,6 @@ __pycache__/
 .codex
 .openai
 ktochitaettotloh
+data/
+*.db-wal
+*.db-shm
