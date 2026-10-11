@@ -30,6 +30,8 @@ from .common import (
     _parse_duration, _spawn, _parse_id_token, _TargetRefused, _clear_raid_reminder,
 )
 from .chat_admin import _leave_chat
+import config
+import translator as _tr
 
 _panel_state: dict[int, dict[str, Any]] = {}
 
@@ -151,6 +153,10 @@ async def _build_chat_menu(bot: Bot, chat_id: int, user_id: int) -> tuple[str, I
                 'admin_btn_autoaccept_on' if db_man.is_auto_accept(chat_id) else 'admin_btn_autoaccept_off'
             ),
             callback_data=f'adm:jreq:{chat_id}',
+        )],
+        [InlineKeyboardButton(
+            text=translator.get_string('admin_btn_lang').format(_tr.locale_name(_chat_locale(chat_id))),
+            callback_data=f'adm:lang:{chat_id}',
         )],
         [InlineKeyboardButton(text=translator.get_string('admin_btn_perms'), callback_data=f'adm:perm:{chat_id}')],
         [InlineKeyboardButton(text=translator.get_string('admin_btn_gbans'), callback_data=f'adm:gb:{chat_id}')],
@@ -289,6 +295,26 @@ def _build_antispam_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
         [InlineKeyboardButton(text=translator.get_string('admin_btn_back'), callback_data=f'adm:c:{chat_id}')],
     ]
     return translator.get_string('antispam_title'), InlineKeyboardMarkup(inline_keyboard=buttons)
+
+
+def _chat_locale(chat_id: int) -> str:
+    """The locale the bot currently speaks in a chat: the admins' pick, else the process default."""
+    return _tr.normalize(db_man.get_chat_lang(chat_id)) or config.LOCALE
+
+
+def _build_lang_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
+    """Sub-menu to pick the language the bot uses inside this chat (announcements, replies,
+    welcome and reminder messages). DMs always follow the user's own Telegram language."""
+    current = _chat_locale(chat_id)
+    buttons = [
+        [InlineKeyboardButton(
+            text=('✅ ' if lc == current else '') + _tr.locale_name(lc),
+            callback_data=f'adm:langset:{chat_id}:{lc}',
+        )]
+        for lc in _tr.available_locales()
+    ]
+    buttons.append([InlineKeyboardButton(text=translator.get_string('admin_btn_back'), callback_data=f'adm:c:{chat_id}')])
+    return translator.get_string('lang_title'), InlineKeyboardMarkup(inline_keyboard=buttons)
 
 
 def _build_perms_menu(chat_id: int) -> tuple[str, InlineKeyboardMarkup]:
@@ -513,6 +539,16 @@ async def admin_callback(callback: types.CallbackQuery, bot: Bot) -> None:
         _record_log(chat_id, callback.from_user, 'log_autoaccept',
                     translator.get_string('autoaccept_state_on' if new_state else 'autoaccept_state_off'))
         text, markup = await _build_chat_menu(bot, chat_id, user_id)
+        await _edit(callback.message, text, markup)
+    elif action == 'lang':
+        text, markup = _build_lang_menu(chat_id)
+        await _edit(callback.message, text, markup)
+    elif action == 'langset':
+        lang = _tr.normalize(parts[3]) if len(parts) > 3 else None
+        if lang and lang != _chat_locale(chat_id):
+            db_man.set_chat_lang(chat_id, lang)
+            _record_log(chat_id, callback.from_user, 'log_lang', _tr.locale_name(lang))
+        text, markup = _build_lang_menu(chat_id)
         await _edit(callback.message, text, markup)
     elif action == 'perm':
         text, markup = _build_perms_menu(chat_id)

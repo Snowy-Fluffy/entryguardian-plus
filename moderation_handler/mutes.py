@@ -164,7 +164,7 @@ async def _run_mute(message: types.Message, command: CommandObject, bot: Bot, *,
             dm_key = 'dm_muted_global'
         else:
             dm_key = 'dm_muted'
-        await _dm_target(bot, target_id, _dm_text(dm_key, message.chat.title or str(message.chat.id), message, reason, dur_words))
+        await _dm_target(bot, target_id, _dm_text(dm_key, message.chat.title or str(message.chat.id), message, reason, dur_text, target_id=target_id))
     _log_global(message, log_key, label, reason, target_id, everywhere=glob)
     return True
 
@@ -229,7 +229,7 @@ async def _run_unmute(message: types.Message, command: CommandObject, bot: Bot, 
             dm_key = 'dm_unmuted_global'
         else:
             dm_key = 'dm_unmuted'
-        await _dm_target(bot, target_id, _dm_text(dm_key, message.chat.title or str(message.chat.id), message, reason))
+        await _dm_target(bot, target_id, _dm_text(dm_key, message.chat.title or str(message.chat.id), message, reason, target_id=target_id))
     _log_global(message, log_key, target, reason, target_id, everywhere=glob)
     return True
 

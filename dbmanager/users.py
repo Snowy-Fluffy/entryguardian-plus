@@ -176,12 +176,33 @@ class UsersMixin:
 		self.connection.commit()
 		return [r[0] for r in rows]
 
-	def remember_dm_user(self, user_id):
+	def remember_dm_user(self, user_id, lang=None):
 		"""Record that this user has messaged the bot in private. A bot can't open a DM on its own,
 		so this table is the only possible audience for a DM broadcast (/broadcast); a user who
-		never wrote to the bot simply can't be reached."""
+		never wrote to the bot simply can't be reached. `lang` is the locale their Telegram client
+		language maps to; it is refreshed whenever it changes."""
 		self.cursor.execute('INSERT OR IGNORE INTO dm_users(user_id, ts) VALUES (?, ?)', (user_id, self.unix_time()))
+		if lang:
+			self.cursor.execute('UPDATE dm_users SET lang=? WHERE user_id=? AND (lang IS NULL OR lang<>?)', (lang, user_id, lang))
 		self.connection.commit()
+
+	def get_user_lang(self, user_id):
+		"""Locale last seen for this user's DMs, or None if we never saw them write in private."""
+		row = self.cursor.execute('SELECT lang FROM dm_users WHERE user_id=?', (user_id,)).fetchone()
+		return row[0] if row else None
+
+	def get_blocked_until(self, user_id):
+		"""Unix time the captcha temp-block ends, or 0 if there is no active block."""
+		status = self.get_captcha_status(user_id)
+		if status and status[1] is not None and status[1] > self.unix_time():
+			return status[1]
+		return 0
+
+	def get_pending_chats_since(self, user_id):
+		"""[(chat_id, since)] of the chats this user still has to pass the captcha in."""
+		return [(row[0], row[1]) for row in self.cursor.execute(
+			'SELECT chat_id, since FROM pending_chats WHERE user_id=?', (user_id,)
+		).fetchall()]
 
 	def forget_dm_user(self, user_id):
 		"""Drop a DM recipient that turned out unreachable (blocked the bot, deleted account)."""

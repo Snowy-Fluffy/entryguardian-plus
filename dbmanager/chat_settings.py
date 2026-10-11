@@ -179,6 +179,23 @@ class ChatSettingsMixin:
 	def get_command_banned(self):
 		return [row[0] for row in self.cursor.execute('SELECT user_id FROM command_banned').fetchall()]
 
+	def get_chat_lang(self, chat_id):
+		"""The locale the bot speaks in this chat, or None if the admins never picked one (the
+		process-wide config.LOCALE applies then)."""
+		row = self.cursor.execute('SELECT lang FROM chat_lang WHERE chat_id=?', (chat_id,)).fetchone()
+		return row[0] if row else None
+
+	def set_chat_lang(self, chat_id, lang):
+		if lang:
+			self.cursor.execute(
+				'INSERT INTO chat_lang(chat_id, lang) VALUES (?, ?) '
+				'ON CONFLICT(chat_id) DO UPDATE SET lang=excluded.lang',
+				(chat_id, lang)
+			)
+		else:
+			self.cursor.execute('DELETE FROM chat_lang WHERE chat_id=?', (chat_id,))
+		self.connection.commit()
+
 	def set_block_bots(self, chat_id, enabled):
 		"""Per-chat toggle: ban any bot added to the chat by a non-privileged member."""
 		if enabled:

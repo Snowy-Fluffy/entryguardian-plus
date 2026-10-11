@@ -23,7 +23,8 @@ import permissions
 # Imported straight from the package's shared module (not re-exported via moderation_handler/__init__):
 # these are the same helpers the message middleware uses for the equivalent checks, so the two
 # enforcement paths can't drift apart.
-from moderation_handler.common import _isend, _clear_captcha_state, translator, _PSEUDO_IDS
+from moderation_handler.common import _isend, _clear_captcha_state, translator, _PSEUDO_IDS, target_lang
+from translator import use_lang
 
 router = Router()
 db_man = DBManager()
@@ -101,6 +102,9 @@ async def on_reaction(event: MessageReactionUpdated, bot: Bot):
         except Exception:
             pass
     try:
-        await bot.send_message(user_id, translator.get_string('reaction_ban_notice').format(max(config.COOL_DOWN, 60) // 60))
+        # A DM: the person's own language, not the (possibly different) language of the chat.
+        with use_lang(target_lang(user_id, chat_id)):
+            notice = translator.get_string('reaction_ban_notice').format(max(config.COOL_DOWN, 60) // 60)
+        await bot.send_message(user_id, notice)
     except Exception:
         pass

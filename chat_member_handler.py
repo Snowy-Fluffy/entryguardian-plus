@@ -26,7 +26,7 @@ import asyncio
 import html
 import logging
 import config
-from translator import Translator
+from translator import Translator, use_lang
 from moderation_handler import invalidate_native_admins, build_chat_permissions
 # Shared with the moderation package on purpose: the same Retry-After wrapper and the same
 # raid-reminder registry (so /raid_off can delete the last reminder this task posted).
@@ -270,7 +270,8 @@ async def raid_reminder_task(bot: Bot) -> None:
                 except Exception:
                     pass
             try:
-                text = html.escape(translator.get_string('raid_reminder').format(count), quote=False)
+                with use_lang(db_man.get_chat_lang(chat_id)):
+                    text = html.escape(translator.get_string('raid_reminder').format(count), quote=False)
                 sent = await bot.send_message(chat_id, f'<i>{text}</i>', parse_mode='HTML')
                 _raid_reminder_msg[chat_id] = sent.message_id
             except Exception:

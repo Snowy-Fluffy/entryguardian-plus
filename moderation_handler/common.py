@@ -28,7 +28,7 @@ from aiogram import Router, types, Bot
 from aiogram.types import ChatPermissions
 from aiogram.filters import CommandObject
 from dbmanager import DBManager
-from translator import Translator
+from translator import Translator, use_lang, lang_for_code
 import permissions
 import config
 
@@ -745,14 +745,34 @@ def _clear_captcha_state_everywhere(user_id: int) -> None:
     db_man.remove_all_pending_unbans(user_id)
 
 
-def _dm_text(key: str, chat_title: str, message: types.Message, reason: str = '', dur_words: str = '') -> str:
-    role_word = _actor_role_word(message.chat.id, message.from_user.id)
-    text = translator.get_string(key).format(chat_title, role_word, _user_label(message.from_user))
-    if dur_words:
-        text += translator.get_string('mute_for').format(dur_words)
-    if reason:
-        text += ', ' + translator.get_string('log_reason').format(reason)
-    return text
+def chat_lang(chat_id: int) -> str | None:
+    """The locale picked for a chat in /admin, or None (= the process default, config.LOCALE)."""
+    return db_man.get_chat_lang(chat_id)
+
+
+def user_lang(user: types.User | None) -> str:
+    """The locale for talking to a user in private: whatever their Telegram client language maps to."""
+    return lang_for_code(user.language_code if user else None, config.LOCALE)
+
+
+def target_lang(target_id: int, chat_id: int | None = None) -> str | None:
+    """Locale for a DM to someone who may never have written to the bot: their last-seen DM
+    language, else the chat the punishment happened in, else None (process default)."""
+    return db_man.get_user_lang(target_id) or (chat_lang(chat_id) if chat_id is not None else None)
+
+
+def _dm_text(key: str, chat_title: str, message: types.Message, reason: str = '', dur_token: str = '',
+             target_id: int | None = None) -> str:
+    """Text of a punishment DM, rendered in the *recipient's* language rather than the (possibly
+    different) language of the chat it happened in. `dur_token` is the raw duration (`5h`)."""
+    with use_lang(target_lang(target_id, message.chat.id) if target_id is not None else None):
+        role_word = _actor_role_word(message.chat.id, message.from_user.id)
+        text = translator.get_string(key).format(chat_title, role_word, _user_label(message.from_user))
+        if dur_token:
+            text += translator.get_string('mute_for').format(_human_duration_words(dur_token))
+        if reason:
+            text += ', ' + translator.get_string('log_reason').format(reason)
+        return text
 
 
 async def _dm_target(bot: Bot, target_id: int, text: str) -> None:

@@ -31,7 +31,7 @@ def _generate_code() -> str:
     return ''.join(secrets.choice(_CODE_CHARS) for _ in range(_CODE_LEN))
 
 
-def create_session(user_id: int, captcha_type: str = 'doom') -> str:
+def create_session(user_id: int, captcha_type: str = 'doom', lang: str | None = None) -> str:
     session_id = str(uuid_module.uuid4())
     sessions[session_id] = {
         'user_id': user_id,
@@ -43,6 +43,7 @@ def create_session(user_id: int, captcha_type: str = 'doom') -> str:
         'kills_registered': 0,
         'last_kill_at': 0.0,
         'captcha_type': captcha_type,
+        'lang': lang,
         'game_passed': False,
         'turnstile_passed': False,
         'altcha_passed': False,
@@ -209,17 +210,17 @@ def remove_user_sessions(user_id: int) -> None:
         sessions.pop(sid)
 
 
-def cleanup_expired() -> list[int]:
-    """Delete expired sessions. Returns user_ids with non-completed expired sessions (once per user)."""
+def cleanup_expired() -> list[tuple[int, str | None]]:
+    """Delete expired sessions. Returns (user_id, lang) of non-completed expired sessions (once per user)."""
     notified: set[int] = set()
-    result: list[int] = []
+    result: list[tuple[int, str | None]] = []
     now = time.time()
     for session_id in list(sessions.keys()):
         session = sessions[session_id]
         if now - session['created_at'] > config.CAPTCHA_TIMEOUT:
             uid = session['user_id']
             if not session['completed'] and uid not in notified:
-                result.append(uid)
+                result.append((uid, session.get('lang')))
                 notified.add(uid)
             del sessions[session_id]
     return result

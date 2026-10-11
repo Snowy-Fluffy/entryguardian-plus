@@ -28,6 +28,7 @@ from .common import (
     _ban_target_or_reply, _punish_labels, _hierarchy_ok, _native_admin_ok, _get_target_or_reply,
     _dm_text, _dm_target,
 )
+from translator import use_lang
 
 
 async def _notify_owners_gban(bot: Bot, message: types.Message, target_label: str, reason: str,
@@ -41,17 +42,18 @@ async def _notify_owners_gban(bot: Bot, message: types.Message, target_label: st
     actor = message.from_user
     if f'id {target_id}' not in target_label:
         target_label = f'{target_label} (id {target_id})'
-    where = (f'{message.chat.title or ""} (id {message.chat.id})'.strip()) if message.chat.type in _GROUP_TYPES \
-        else translator.get_string('gban_owner_notice_dm')
-    text = translator.get_string('gban_owner_notice').format(
-        target_label,
-        f'{_user_label(actor)} (id {actor.id})',
-        where,
-        reason or translator.get_string('gban_owner_notice_noreason'),
-    )
+    where_chat = (f'{message.chat.title or ""} (id {message.chat.id})'.strip()) if message.chat.type in _GROUP_TYPES else None
     for owner_id in config.OWNERS:
         if owner_id == actor.id:
             continue
+        # Each owner gets it in their own DM language, not the language of the chat it happened in.
+        with use_lang(db_man.get_user_lang(owner_id)):
+            text = translator.get_string('gban_owner_notice').format(
+                target_label,
+                f'{_user_label(actor)} (id {actor.id})',
+                where_chat or translator.get_string('gban_owner_notice_dm'),
+                reason or translator.get_string('gban_owner_notice_noreason'),
+            )
         try:
             await bot.send_message(owner_id, text)
         except Exception:
@@ -230,9 +232,9 @@ async def gban(message: types.Message, command: CommandObject, bot: Bot) -> None
     await _notify_owners_gban(bot, message, banned, reason, target_id)
     if is_dm:
         await _isend_html(bot, message.chat.id, global_text)
-        await _dm_target(bot, target_id, _dm_text('dm_banned_global_nosrc', '', message, reason))
+        await _dm_target(bot, target_id, _dm_text('dm_banned_global_nosrc', '', message, reason, target_id=target_id))
     else:
-        await _dm_target(bot, target_id, _dm_text('dm_banned_global', source_title, message, reason))
+        await _dm_target(bot, target_id, _dm_text('dm_banned_global', source_title, message, reason, target_id=target_id))
 
 
 @router.message(Command('ban'))
@@ -268,7 +270,7 @@ async def ban(message: types.Message, command: CommandObject, bot: Bot) -> None:
     _clear_captcha_state(message.chat.id, target_id)
     _log_action(message, 'log_lban', banned, reason, target_id)
     await _announce_ban(message, banned_html, reason)
-    await _dm_target(bot, target_id, _dm_text('dm_banned', message.chat.title or str(message.chat.id), message, reason))
+    await _dm_target(bot, target_id, _dm_text('dm_banned', message.chat.title or str(message.chat.id), message, reason, target_id=target_id))
     _cooldown_mark(message, 'ban')
 
 
@@ -356,7 +358,7 @@ async def unban(message: types.Message, command: CommandObject, bot: Bot) -> Non
     actor = _actor_mention(message.from_user)
     await _ianswer_html(message, translator.get_string('unban_announce').format(
         name_html, role_word, actor))
-    await _dm_target(bot, target_id, _dm_text('dm_unbanned', message.chat.title or str(message.chat.id), message))
+    await _dm_target(bot, target_id, _dm_text('dm_unbanned', message.chat.title or str(message.chat.id), message, target_id=target_id))
     _cooldown_mark(message, 'unban')
 
 
@@ -404,9 +406,9 @@ async def ungban(message: types.Message, command: CommandObject, bot: Bot) -> No
                 pass
     if is_dm:
         await _isend_html(bot, message.chat.id, global_text)
-        await _dm_target(bot, target_id, _dm_text('dm_unbanned_global_nosrc', '', message))
+        await _dm_target(bot, target_id, _dm_text('dm_unbanned_global_nosrc', '', message, target_id=target_id))
     else:
-        await _dm_target(bot, target_id, _dm_text('dm_unbanned_global', source_title, message))
+        await _dm_target(bot, target_id, _dm_text('dm_unbanned_global', source_title, message, target_id=target_id))
 
 
 @router.message(Command('unsban'))

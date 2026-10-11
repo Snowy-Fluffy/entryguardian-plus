@@ -21,7 +21,7 @@ shared by more than one of them. Importing this package registers every command/
 on `router` as a side effect — see each submodule for its own command grid."""
 
 from .common import router, build_chat_permissions, scheduled_delete_task, invalidate_native_admins
-from .middleware import UserTrackingMiddleware, flush_messages_task, purge_old_messages_task
+from .middleware import UserTrackingMiddleware, LanguageMiddleware, flush_messages_task, purge_old_messages_task
 from . import roles
 from . import reports
 from . import bans
@@ -33,6 +33,7 @@ from . import admin_panel
 __all__ = [
     'router',
     'UserTrackingMiddleware',
+    'LanguageMiddleware',
     'flush_messages_task',
     'purge_old_messages_task',
     'scheduled_delete_task',

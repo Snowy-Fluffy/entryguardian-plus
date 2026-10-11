@@ -132,6 +132,11 @@ class DBManager(UsersMixin, RolesMixin, BansMixin, MutesMixin, ChatSettingsMixin
 			self.cursor.execute('CREATE TABLE dm_users(user_id INTEGER PRIMARY KEY, ts INTEGER)')
 		if 'captcha_ips' not in tables:
 			self.cursor.execute('CREATE TABLE captcha_ips(user_id INTEGER PRIMARY KEY, ip TEXT, user_agent TEXT, ts INTEGER)')
+		if 'chat_lang' not in tables:
+			self.cursor.execute('CREATE TABLE chat_lang(chat_id INTEGER PRIMARY KEY, lang TEXT)')
+		dm_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(dm_users)').fetchall()}
+		if 'lang' not in dm_cols:
+			self.cursor.execute('ALTER TABLE dm_users ADD COLUMN lang TEXT')
 		origin_cols = {row[1] for row in self.cursor.execute('PRAGMA table_info(captcha_origin)').fetchall()}
 		if 'via' not in origin_cols:
 			self.cursor.execute("ALTER TABLE captcha_origin ADD COLUMN via TEXT DEFAULT 'join'")

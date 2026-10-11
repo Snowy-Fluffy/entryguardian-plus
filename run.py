@@ -54,6 +54,10 @@ async def main():
 
     dp.message.outer_middleware(moderation_handler.UserTrackingMiddleware())
     dp.edited_message.outer_middleware(moderation_handler.UserTrackingMiddleware())
+    # Reply language for everything the tracking middleware doesn't cover (panel callbacks,
+    # chat_member / join request / reaction updates).
+    for observer in (dp.callback_query, dp.chat_member, dp.my_chat_member, dp.chat_join_request, dp.message_reaction):
+        observer.outer_middleware(moderation_handler.LanguageMiddleware())
 
     dp.include_router(moderation_handler.router)
     dp.include_router(personal_msg_handler.router)

@@ -24,8 +24,9 @@ from aiogram.types.chat_member_updated import ChatMemberUpdated
 from aiogram.filters import IS_NOT_MEMBER, IS_MEMBER, MEMBER, ADMINISTRATOR
 import permissions
 import config
+from translator import use_lang
 from .common import (
-    router, db_man, translator, _GROUP_TYPES, _spawn,
+    router, db_man, translator, _GROUP_TYPES, _spawn, chat_lang, user_lang,
     _seen_cache, _isend, _isend_html, _identity_html, _full_user_info, _chat_info,
     _channel_mention, _message_link, _report_recipients, _human_elapsed, _seconds_to_words,
     _clear_captcha_state, _MUTED_PERMS, _is_native_admin, _PSEUDO_IDS, _flood_safe,
@@ -85,6 +86,46 @@ async def _sweep_blocklist_chat(bot: Bot, chat_id: int) -> int:
     return banned_count
 
 
+_dm_lang_seen: dict[int, str] = {}
+
+
+def _message_lang(event: types.Message) -> str | None:
+    """Locale to answer a message in: the chat's own setting in a group, the sender's Telegram
+    client language in private (and remembered, so later DMs initiated by the bot — expiry
+    notices, punishment DMs — speak it too)."""
+    if event.chat and event.chat.type == 'private':
+        user = event.from_user
+        if user is None:
+            return None
+        lang = user_lang(user)
+        if _dm_lang_seen.get(user.id) != lang:
+            db_man.remember_dm_user(user.id, lang)
+            _dm_lang_seen[user.id] = lang
+        return lang
+    return chat_lang(event.chat.id) if event.chat else None
+
+
+class LanguageMiddleware(BaseMiddleware):
+    """Sets the reply language for every update type UserTrackingMiddleware doesn't see: callback
+    queries (the /admin panel talks to the admin in *their* language, group buttons in the group's)
+    and chat_member / my_chat_member / chat_join_request / message_reaction (the chat's language)."""
+
+    async def __call__(self, handler: Callable[[Any, dict[str, Any]], Awaitable[Any]], event: Any, data: dict[str, Any]) -> Any:
+        lang = None
+        if isinstance(event, types.CallbackQuery):
+            chat = event.message.chat if event.message else None
+            if chat is not None and chat.type != 'private':
+                lang = chat_lang(chat.id)
+            else:
+                lang = user_lang(event.from_user)
+        else:
+            chat = getattr(event, 'chat', None)
+            if chat is not None and chat.type != 'private':
+                lang = chat_lang(chat.id)
+        with use_lang(lang):
+            return await handler(event, data)
+
+
 class UserTrackingMiddleware(BaseMiddleware):
     """Records username → user_id for everyone the bot sees, so @username can be resolved later,
     and enforces the global blocklist on existing members who were never seen joining.
@@ -104,6 +145,15 @@ class UserTrackingMiddleware(BaseMiddleware):
     """
 
     async def __call__(
+        self,
+        handler: Callable[[types.Message, dict[str, Any]], Awaitable[Any]],
+        event: types.Message,
+        data: dict[str, Any],
+    ) -> Any:
+        with use_lang(_message_lang(event)):
+            return await self._dispatch(handler, event, data)
+
+    async def _dispatch(
         self,
         handler: Callable[[types.Message, dict[str, Any]], Awaitable[Any]],
         event: types.Message,

@@ -31,7 +31,7 @@ from captcha.image import ImageCaptcha
 import config
 import session_manager
 from dbmanager import DBManager
-from translator import Translator
+from translator import Translator, use_lang, lang_for_code
 
 db_man = DBManager()
 translator = Translator(config.LOCALE)
@@ -118,7 +118,7 @@ async def rate_limit_middleware(request: web.Request, handler):
     if len(bucket) >= config.RATE_LIMIT_MAX:
         if request.path.startswith('/captcha/'):
             # A person in the in-app browser, not a script: give them a page, not JSON.
-            return web.Response(text=_captcha_page_html('', '', 'doom', state='ratelimit'),
+            return web.Response(text=_captcha_page_html('', '', 'doom', state='ratelimit', lang=_request_lang(request)),
                                 content_type='text/html', status=429,
                                 headers={'Cache-Control': 'no-store'})
         return web.json_response({'error': 'rate limited'}, status=429)
@@ -176,12 +176,26 @@ def _js_json(obj) -> str:
     return json.dumps(obj, ensure_ascii=True).replace('</', '<\\/')
 
 
-def _captcha_page_html(session_id: str, challenge: str, captcha_type: str, state: str = 'intro') -> str:
+def _request_lang(request: web.Request) -> str:
+    """Locale for a page with no session to read it from (unknown/expired link, rate limit):
+    the first language of the browser's Accept-Language, mapped to a shipped locale."""
+    first = request.headers.get('Accept-Language', '').split(',')[0].split(';')[0].strip()
+    return lang_for_code(first, config.LOCALE)
+
+
+def _captcha_page_html(session_id: str, challenge: str, captcha_type: str, state: str = 'intro',
+                       lang: str | None = None) -> str:
     """Render the single captcha page template. `state` picks the initial screen: 'intro' (the
     normal flow — game, then the verification stages), 'completed' (session already finished:
     straight to the code image), or 'error' (unknown/expired session — session_id/challenge are
     then irrelevant and may be empty). All copy comes from the l10n `web_*` keys, so the page
-    follows config.LOCALE like the bot's Telegram messages do."""
+    follow `lang` (the language the user talked to the bot in, kept in the session; config.LOCALE
+    if unknown) like the bot's Telegram messages do."""
+    with use_lang(lang):
+        return _render_captcha_page(session_id, challenge, captcha_type, state, lang or config.LOCALE)
+
+
+def _render_captcha_page(session_id: str, challenge: str, captcha_type: str, state: str, lang: str) -> str:
     t = translator.get_string
     iframe_style = ''
     if captcha_type == 'tetris':
@@ -206,7 +220,7 @@ def _captcha_page_html(session_id: str, challenge: str, captcha_type: str, state
         captcha_desc = t('web_desc_doom').format(config.CAPTCHA_ENEMIES)
     page = (
         _get_wrapper_template()
-        .replace('__LANG__', config.LOCALE.split('_')[0].lower() or 'en')
+        .replace('__LANG__', lang.split('_')[0].lower() or 'en')
         .replace('__UUID__', session_id)
         .replace('__CHALLENGE__', challenge)
         .replace('__IFRAME_SRC__', _js_json(iframe_src))
@@ -228,7 +242,7 @@ async def handle_captcha_page(request: web.Request) -> web.Response:
     session_id = request.match_info['uuid']
     session = session_manager.sessions.get(session_id)
     if not session or session_manager.is_expired(session_id):
-        return web.Response(text=_captcha_page_html('', '', 'doom', state='error'),
+        return web.Response(text=_captcha_page_html('', '', 'doom', state='error', lang=_request_lang(request)),
                             content_type='text/html', status=410, headers=_NO_STORE)
 
     if config.COLLECT_CAPTCHA_IPS:
@@ -241,11 +255,11 @@ async def handle_captcha_page(request: web.Request) -> web.Response:
 
     captcha_type = session.get('captcha_type', 'doom')
     if session.get('completed') and session.get('code'):
-        return web.Response(text=_captcha_page_html(session_id, '', captcha_type, state='completed'),
+        return web.Response(text=_captcha_page_html(session_id, '', captcha_type, state='completed', lang=session.get('lang')),
                             content_type='text/html', headers=_NO_STORE)
     challenge = session_manager.set_page_loaded(session_id)
     # no-store: the back button / bfcache must not resurrect a page whose challenge was reset.
-    return web.Response(text=_captcha_page_html(session_id, challenge, captcha_type),
+    return web.Response(text=_captcha_page_html(session_id, challenge, captcha_type, lang=session.get('lang')),
                         content_type='text/html', headers=_NO_STORE)
 
 

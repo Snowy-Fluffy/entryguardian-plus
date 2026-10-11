@@ -350,6 +350,7 @@
             turnstileWidgetId = turnstile.render('#turnstile-widget', {
                 sitekey: turnstileSiteKey,
                 theme: 'dark',
+                language: '__LANG__',
                 callback: onTurnstileSuccess,
                 'error-callback': function () {
                     if (turnstileWidgetId !== null) turnstile.reset(turnstileWidgetId);
