@@ -104,7 +104,7 @@ COLLECT_CAPTCHA_IPS=0
 # detect duplicates, so turn off if that's a privacy concern. See "Moderation" below.
 ANTISPAM_ENABLED=1
 SERVICE_REPLY_TTL=30        # seconds before the bot's service replies (errors, confirmations, /rules, /staff) auto-delete in groups; 0 = keep
-NOTIFY_OWNERS_GBAN=0        # DM every owner (except the issuer) about each new global ban: who, by whom, from where, reason
+NOTIFY_OWNERS_GBAN=0        # DM every owner (except the issuer) about each new global ban or global unban: who, by whom, from where (+ reason for bans)
 ```
 
 ## Moderation
@@ -182,7 +182,7 @@ Command messages are deleted automatically after they are processed (the bot nee
 
 The **global** commands (`/gban`, `/sgban`, `/gmute`, `/gsmute`, `/ungban`, `/unsgban`, `/ungmute`, `/ungsmute`) can also be sent in a **private chat with the bot** — by **owners only** (target by ID or @username). Chat admins can issue them only from inside a group they administer; from DM the bot answers "no permission". When issued from DM the broadcast to all chats omits the source chat — it just says "globally banned/muted/…" — and the issuer gets a confirmation in DM. **Every global action is logged in every chat** the bot knows (the staff action log in `/admin`, and therefore `/punl` in any of them) — whether issued from a group or from DM, by an admin or an owner. `/punl` in DM aggregates across chats and collapses those repeated entries into one. Silent variants still post and DM nothing to the chats/target.
 
-**Owner notifications for global bans** (`NOTIFY_OWNERS_GBAN=1`): every owner except the one who issued it gets a DM for each new `/gban`, `/sgban` or global channel ban — who was banned, by whom, from which chat (or "private chat with the bot" for DM-issued ones) and the reason. Silent variants are reported too — "silent" is about the chats, not the owners.
+**Owner notifications for global bans and unbans** (`NOTIFY_OWNERS_GBAN=1`): every owner except the one who issued it gets a DM for each new `/gban`, `/sgban` or global channel ban — who was banned, by whom, from which chat (or "private chat with the bot" for DM-issued ones) and the reason. The same goes for `/ungban`, `/unsgban` and global channel unbans (without a reason). Silent variants are reported too — "silent" is about the chats, not the owners.
 
 **Local beats global.** A local decision in a chat overrides a global one there, for bans and mutes alike: `/unban` of a globally banned user, or `/unmute` of a globally muted one, lifts the punishment in that chat only (recorded as a per-chat exception); a later local `/ban`/`/mute` in the same chat cancels that exception; a fresh global `/gban`/`/gmute` (or its reversal) resets every local exception for that user. In the other direction, a global **amnesty** (`/ungban`, `/ungmute`) lifts only the global punishment: a chat's own local `/ban` or `/mute` stays in force there — an admin of chat B can't undo chat A's local decisions. Everything — local and global mutes/bans and their exceptions — is stored in the database and enforced from it, so it survives restarts.
 

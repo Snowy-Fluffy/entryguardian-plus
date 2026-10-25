@@ -239,6 +239,7 @@
 	"punl_globally_muted": "🔇 Глобально заглушён (навсегда)",
 	"punl_origin_chat": "Пришёл через чат: {0} (id {1}) — {2}",
 	"gban_owner_notice": "🚫 Новый глобальный бан\nКто: {0}\nКем: {1}\nОткуда: {2}\nПричина: {3}",
+	"ungban_owner_notice": "✅ Глобальный разбан\nКто: {0}\nКем: {1}\nОткуда: {2}",
 	"gban_owner_notice_dm": "личные сообщения с ботом",
 	"gban_owner_notice_noreason": "не указана",
 	"gban_time_unknown": "дата неизвестна",

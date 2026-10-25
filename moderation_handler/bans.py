@@ -32,9 +32,9 @@ from translator import use_lang
 
 
 async def _notify_owners_gban(bot: Bot, message: types.Message, target_label: str, reason: str,
-                              target_id: int) -> None:
+                              target_id: int, *, unban: bool = False) -> None:
     """config.NOTIFY_OWNERS_GBAN: DM every owner except the issuer about a new global ban (user or
-    channel). Plain text — labels are already plain; the ids are spelled out explicitly (the
+    channel), or with unban=True about a global unban (no reason line). Plain text — labels are already plain; the ids are spelled out explicitly (the
     plain label is a display name only, which can be as uninformative as ".").  Silent variants
     are reported too: 'silent' is about the chats, not about the owners."""
     if not config.NOTIFY_OWNERS_GBAN:
@@ -48,12 +48,19 @@ async def _notify_owners_gban(bot: Bot, message: types.Message, target_label: st
             continue
         # Each owner gets it in their own DM language, not the language of the chat it happened in.
         with use_lang(db_man.get_user_lang(owner_id)):
-            text = translator.get_string('gban_owner_notice').format(
-                target_label,
-                f'{_user_label(actor)} (id {actor.id})',
-                where_chat or translator.get_string('gban_owner_notice_dm'),
-                reason or translator.get_string('gban_owner_notice_noreason'),
-            )
+            if unban:
+                text = translator.get_string('ungban_owner_notice').format(
+                    target_label,
+                    f'{_user_label(actor)} (id {actor.id})',
+                    where_chat or translator.get_string('gban_owner_notice_dm'),
+                )
+            else:
+                text = translator.get_string('gban_owner_notice').format(
+                    target_label,
+                    f'{_user_label(actor)} (id {actor.id})',
+                    where_chat or translator.get_string('gban_owner_notice_dm'),
+                    reason or translator.get_string('gban_owner_notice_noreason'),
+                )
         try:
             await bot.send_message(owner_id, text)
         except Exception:
@@ -186,6 +193,8 @@ async def _maybe_channel_unban(message: types.Message, bot: Bot,
                         pass
         else:
             await _ianswer_html(message, translator.get_string('unban_announce').format(mention, role_word, actor))
+    if glob:
+        await _notify_owners_gban(bot, message, title, '', channel.id, unban=True)
     return True
 
 
@@ -409,6 +418,7 @@ async def ungban(message: types.Message, command: CommandObject, bot: Bot) -> No
         await _dm_target(bot, target_id, _dm_text('dm_unbanned_global_nosrc', '', message, target_id=target_id))
     else:
         await _dm_target(bot, target_id, _dm_text('dm_unbanned_global', source_title, message, target_id=target_id))
+    await _notify_owners_gban(bot, message, name, '', target_id, unban=True)
 
 
 @router.message(Command('unsban'))
@@ -462,3 +472,4 @@ async def unsgban(message: types.Message, command: CommandObject, bot: Bot) -> N
     _log_global(message, 'log_unsgban', name, '', target_id, everywhere=True)
     if is_dm:
         await _isend_html(bot, message.chat.id, _global_unban_text(name_html))
+    await _notify_owners_gban(bot, message, name, '', target_id, unban=True)

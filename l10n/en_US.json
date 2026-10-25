@@ -239,6 +239,7 @@
 	"punl_globally_muted": "🔇 Globally muted (forever)",
 	"punl_origin_chat": "Came in via chat: {0} (id {1}) — {2}",
 	"gban_owner_notice": "🚫 New global ban\nWho: {0}\nBy: {1}\nFrom: {2}\nReason: {3}",
+	"ungban_owner_notice": "✅ Global unban\nWho: {0}\nBy: {1}\nFrom: {2}",
 	"gban_owner_notice_dm": "private chat with the bot",
 	"gban_owner_notice_noreason": "not given",
 	"gban_time_unknown": "date unknown",
